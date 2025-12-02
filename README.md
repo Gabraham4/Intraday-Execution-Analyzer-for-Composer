@@ -12,16 +12,13 @@
   ### Prerequisites
   Install [Node.js](https://nodejs.org/) (LTS version)
 
-  ```bash
-  # Verify installation
+ Verify installation
   node --version
 
-  Run
-
-  # Interactive menu
+  ## Run Interactive menu
   node intraday-analyzer-standalone-v3.js
 
-  # Or direct CLI
+  ## Or direct CLI
   node intraday-analyzer-standalone-v3.js dual <symphony_id>
   node intraday-analyzer-standalone-v3.js single <symphony_id>
 
@@ -31,7 +28,7 @@
   The ID is: VfLXEvcG8VXvw52N8g9l
 
   ---
-  Two Analysis Types
+  ## Two Analysis Types
 
   1. DUAL Trade Time Analysis
 
