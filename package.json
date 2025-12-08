@@ -1,0 +1,39 @@
+{
+  "name": "intraday-execution-analyzer-for-composer",
+  "version": "1.3.0",
+  "description": "Analyze whether executing your Composer.trade symphony at different times of day improves returns",
+  "main": "intraday-analyzer-v1.3.js",
+  "bin": "intraday-analyzer-v1.3.js",
+  "scripts": {
+    "build": "pkg . --targets node18-win-x64,node18-linux-x64,node18-macos-x64,node18-macos-arm64 --output dist/intraday-analyzer",
+    "build:win": "pkg . --targets node18-win-x64 --output dist/intraday-analyzer-win",
+    "build:linux": "pkg . --targets node18-linux-x64 --output dist/intraday-analyzer-linux",
+    "build:macos-intel": "pkg . --targets node18-macos-x64 --output dist/intraday-analyzer-macos-x64",
+    "build:macos-arm": "pkg . --targets node18-macos-arm64 --output dist/intraday-analyzer-macos-arm64"
+  },
+  "pkg": {
+    "scripts": "intraday-analyzer-v1.3.js",
+    "assets": [],
+    "targets": [
+      "node18-win-x64",
+      "node18-linux-x64",
+      "node18-macos-x64",
+      "node18-macos-arm64"
+    ],
+    "outputPath": "dist"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gabraham4/Intraday-Execution-Analyzer-for-Composer.git"
+  },
+  "keywords": ["composer", "trading", "symphony", "intraday", "analysis"],
+  "author": "Gabraham4",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Gabraham4/Intraday-Execution-Analyzer-for-Composer/issues"
+  },
+  "homepage": "https://github.com/Gabraham4/Intraday-Execution-Analyzer-for-Composer#readme",
+  "devDependencies": {
+    "pkg": "^5.8.1"
+  }
+}
