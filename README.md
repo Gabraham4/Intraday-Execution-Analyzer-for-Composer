@@ -49,10 +49,12 @@ Download pre-built executables from [Releases](https://github.com/Gabraham4/Intr
 
 | Platform | File |
 |----------|------|
-| Windows | `intraday-analyzer-win.exe` |
-| macOS (Intel) | `intraday-analyzer-macos-x64` |
-| macOS (Apple Silicon) | `intraday-analyzer-macos-arm64` |
-| Linux | `intraday-analyzer-linux` |
+| Windows | `intraday-analyzer-win.zip` |
+| macOS (Intel) | `intraday-analyzer-macos-x64.zip` |
+| macOS (Apple Silicon) | `intraday-analyzer-macos-arm64.zip` |
+| Linux | `intraday-analyzer-linux.zip` |
+
+**macOS Users:** After extracting, you may need to right-click → Open the first time, or run `xattr -cr intraday-analyzer-*` to bypass Gatekeeper.
 
 ---
 
