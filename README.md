@@ -1,6 +1,6 @@
 # Intraday Execution Analyzer for Composer
 
-A standalone tool to analyze whether executing your [Composer.trade](https://composer.trade) symphony at different times of day improves returns compared to the default 3:45 PM auto-rebalance.
+A standalone tool to analyze whether executing your [Composer.trade](https://composer.trade) symphony at different times of day improves returns compared to the default 3:45-4:00 PM trading window auto-rebalance.
 
 **No API keys required** - uses Yahoo Finance public data
 
@@ -8,7 +8,7 @@ A standalone tool to analyze whether executing your [Composer.trade](https://com
 
 ## What This Tool Does
 
-Composer symphonies auto-execute at ~3:45 PM ET. But what if executing earlier in the day would give better results? This tool simulates your strategy at multiple intraday times and compares outcomes.
+Composer symphonies auto-execute during the 3:45-4:00 PM ET trading window. But what if executing earlier in the day would give better results? This tool simulates your strategy at multiple intraday times and compares outcomes.
 
 **Analysis Times:** 9:30, 9:45, 10:00, 10:30, 11:00, 12:00, 13:45, and your configured EOD time (default 15:45)
 
@@ -21,7 +21,7 @@ Composer symphonies auto-execute at ~3:45 PM ET. But what if executing earlier i
 - **Signal Flip Frequency** - How often do signals differ morning vs EOD?
 - **Holdings Check by Date** - What holdings would you have at each time on a given day?
 - **Indicator Validation** - Debug mode to trace through IF/FILTER decisions
-- **Customizable EOD Time** - Option 7 lets you change the baseline EOD time
+- **Customizable EOD Time** - Option 7 lets you set your baseline to 3:45, 3:50, 3:55, or 4:00 PM
 
 ---
 
@@ -102,7 +102,7 @@ https://app.composer.trade/symphony/VfLXEvcG8VXvw52N8g9l/factsheet
 
 ### Option 7: Customize EOD Time
 
-By default, the tool compares against 15:45 (3:45 PM). Use **Option 7** to change this if your broker or setup uses a different execution time.
+By default, the tool compares against 15:45 (3:45 PM). Use **Option 7** to set your baseline EOD time to 3:45, 3:50, 3:55, or 4:00 PM depending on when your trades tend to execute within Composer's trading window.
 
 ---
 
