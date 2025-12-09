@@ -10,7 +10,7 @@ A standalone tool to analyze whether executing your [Composer.trade](https://com
 
 Composer symphonies auto-execute during the 3:45-4:00 PM ET trading window. But what if executing earlier in the day would give better results? This tool simulates your strategy at multiple intraday times and compares outcomes.
 
-**Analysis Times:** 9:30, 9:45, 10:00, 10:30, 11:00, 12:00, 13:45, and your configured EOD time (default 15:45)
+**Analysis Times:** 9:30, 9:35, 9:45, 10:00, 10:30, 11:00, 12:00, 13:45, and your configured EOD time (default 15:45)
 
 ---
 
@@ -18,10 +18,11 @@ Composer symphonies auto-execute during the 3:45-4:00 PM ET trading window. But 
 
 - **Dual Trade Time Analysis** - "Should I trade at BOTH morning AND 3:45pm?"
 - **Single Time Replacement** - "Should I REPLACE 3:45pm with a different time?"
+- **Combined Analysis (NEW)** - Runs both analyses and recommends the best approach considering return improvement AND drawdown risk
 - **Signal Flip Frequency** - How often do signals differ morning vs EOD?
 - **Holdings Check by Date** - What holdings would you have at each time on a given day?
 - **Indicator Validation** - Debug mode to trace through IF/FILTER decisions
-- **Customizable EOD Time** - Option 7 lets you set your baseline to 3:45, 3:50, 3:55, or 4:00 PM
+- **Customizable EOD Time** - Set your baseline to 3:45, 3:50, 3:55, or 4:00 PM
 
 ---
 
@@ -82,12 +83,16 @@ https://app.composer.trade/symphony/VfLXEvcG8VXvw52N8g9l/factsheet
   2. SINGLE TIME REPLACEMENT ANALYSIS
      "Should I REPLACE 15:45 with a different time?"
 
+  3. COMBINED ANALYSIS (Dual + Single)
+     Runs both analyses and recommends the best approach considering
+     return improvement AND drawdown risk.
+
 ──────────────────────────────────────────────────────────────────────
   SIGNAL SUB-ANALYSIS:
 ──────────────────────────────────────────────────────────────────────
 
-  3. Signal Flip Frequency  - How often do signals differ morning vs EOD?
-  4. Holdings Check by Date - What holdings at each time on a given day?
+  4. Signal Flip Frequency  - How often do signals differ morning vs EOD?
+  5. Holdings Check by Date - What holdings at each time on a given day?
 
 ──────────────────────────────────────────────────────────────────────
   DEBUGGING:
@@ -117,6 +122,9 @@ node intraday-analyzer-v1.3.js dual <symphony_id>
 # Single time replacement analysis
 node intraday-analyzer-v1.3.js single <symphony_id>
 
+# Combined analysis (both dual and single)
+node intraday-analyzer-v1.3.js combined <symphony_id>
+
 # Signal flip frequency
 node intraday-analyzer-v1.3.js flip <symphony_id>
 
@@ -141,7 +149,7 @@ node intraday-analyzer-v1.3.js validate <symphony_id>
 - Very complex symphonies (100+ IF nodes, deeply nested structures) may occasionally produce slightly different holdings than Composer
 - This is typically due to minor data source differences between Yahoo Finance and Composer's Xignite feed
 - The tool works best with symphonies under ~50 IF/FILTER nodes
-- Always verify with Option 4 (Holdings Check) against your actual Composer holdings
+- Always verify with Option 5 (Holdings Check) against your actual Composer holdings
 
 ### Verified Indicators
 
@@ -189,6 +197,15 @@ Example for 14-day RSI at 10:30am:
 | STICK_EOD | Dual-time worse by > 5% vs EOD-only |
 | MARGINAL | Difference within +/- 5% |
 
+### Combined Analysis Recommendations
+
+The Combined Analysis (Option 3) considers both return improvement AND drawdown risk:
+
+- Flags strategies with high drawdown (>30%)
+- Warns if drawdown increases significantly (>5% worse)
+- Compares risk-adjusted returns between dual and single approaches
+- Recommends the best overall approach
+
 ### Confidence Level
 
 - Results are directional indicators, not guarantees
@@ -215,12 +232,13 @@ Example for 14-day RSI at 10:30am:
 | "No data available" | Ticker may be delisted or have different Yahoo symbol |
 | "Not enough trading days" | Need at least 5 trading days |
 | "JSON parse error" | Rate limiting - wait and retry |
-| Holdings don't match | Use Option 4 to debug; complex strategies may have edge cases |
+| Holdings don't match | Use Option 5 to debug; complex strategies may have edge cases |
 
 ---
 
 ## Version History
 
+- **v1.3.1** - Added Combined Analysis mode, added 9:35am test time, improved summary tables with row separators and multi-row name support
 - **v1.3** - Fixed Moving Average of Return formula (empirically verified), improved filter handling
 - **v3** - Major rewrite: daily bars for indicators (matches Composer), intraday price for "today"
 - **v2** - Added signal flip analysis

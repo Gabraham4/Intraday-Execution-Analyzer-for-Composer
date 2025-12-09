@@ -25,7 +25,7 @@ const readline = require('readline');
 // ============================================================================
 
 const CONFIG = {
-  TEST_TIMES: ['09:30', '09:45', '10:00', '10:30', '11:00', '12:00', '13:45'],
+  TEST_TIMES: ['09:30', '09:35', '09:45', '10:00', '10:30', '11:00', '12:00', '13:45'],
   EOD_TIME: '15:45',
   EOD_TIME_OPTIONS: ['15:45', '15:50', '15:55', '16:00'],
   INTRADAY_INTERVAL: '5m',  // 5-minute bars to support 15:50, 15:55 options
@@ -1690,30 +1690,105 @@ function printDualTimeResults(results) {
 
   // Summary
   if (results.filter(r => !r.error).length > 1) {
-    console.log(`\n${'═'.repeat(100)}`);
+    // Helper: get display width of string (emojis count as 2)
+    const getDisplayWidth = (str) => {
+      let width = 0;
+      for (const char of str) {
+        const code = char.codePointAt(0);
+        // Emoji ranges and other wide characters
+        if (code > 0x1F000 || (code >= 0x2600 && code <= 0x27BF) || (code >= 0x1F300 && code <= 0x1F9FF)) {
+          width += 2;
+        } else {
+          width += 1;
+        }
+      }
+      return width;
+    };
+
+    // Helper: pad string to display width (accounting for emojis)
+    const padEndDisplay = (str, targetWidth) => {
+      const currentWidth = getDisplayWidth(str);
+      const padding = Math.max(0, targetWidth - currentWidth);
+      return str + ' '.repeat(padding);
+    };
+
+    // Helper: wrap string into lines of max display width (respects emoji widths)
+    const wrapText = (str, maxWidth) => {
+      const lines = [];
+      let currentLine = '';
+      let currentWidth = 0;
+
+      for (const char of str) {
+        const code = char.codePointAt(0);
+        const charWidth = (code > 0x1F000 || (code >= 0x2600 && code <= 0x27BF) || (code >= 0x1F300 && code <= 0x1F9FF)) ? 2 : 1;
+
+        if (currentWidth + charWidth > maxWidth) {
+          lines.push(currentLine);
+          currentLine = char;
+          currentWidth = charWidth;
+        } else {
+          currentLine += char;
+          currentWidth += charWidth;
+        }
+      }
+      if (currentLine) lines.push(currentLine);
+      return lines;
+    };
+
+    // Fixed max width for name column to keep table readable
+    const MAX_NAME_WIDTH = 50;
+    const validResults = results.filter(r => !r.error);
+    const maxNameWidth = Math.min(MAX_NAME_WIDTH, Math.max(8, ...validResults.map(r => getDisplayWidth(r.name))));
+    const nameCol = maxNameWidth + 2;  // padding
+    const totalWidth = nameCol + 67;  // other columns width
+
+    console.log(`\n${'═'.repeat(totalWidth + 4)}`);
     console.log('  SUMMARY');
-    console.log(`${'═'.repeat(100)}\n`);
+    console.log(`${'═'.repeat(totalWidth + 4)}\n`);
 
-    console.log('  ┌────────────────────────────────────────┬───────┬───────────┬───────────┬─────────────┐');
-    console.log('  │ Strategy                               │ Days  │ EOD-Only  │ Best Dual │ Improvement │');
-    console.log('  ├────────────────────────────────────────┼───────┼───────────┼───────────┼─────────────┤');
+    // New column order: Strategy | Days | Best Time | DD Chg | EOD-Only | Best | Improvement
+    console.log(`  ┌${'─'.repeat(nameCol)}┬───────┬───────────┬─────────┬───────────┬───────────┬─────────────┐`);
+    console.log(`  │ ${'Strategy'.padEnd(nameCol - 2)} │ Days  │ Best Time │ DD Chg  │ EOD-Only  │   Best    │ Improvement │`);
+    console.log(`  ├${'─'.repeat(nameCol)}┼───────┼───────────┼─────────┼───────────┼───────────┼─────────────┤`);
 
-    for (const r of results) {
-      if (r.error) continue;
-      const name = r.name.length > 38 ? r.name.substring(0, 35) + '...' : r.name;
+    for (let idx = 0; idx < validResults.length; idx++) {
+      const r = validResults[idx];
       const eod = `${r.eod.cumReturn >= 0 ? '+' : ''}${r.eod.cumReturn.toFixed(0)}%`;
       const best = `${r.times[r.bestTime].cumReturn >= 0 ? '+' : ''}${r.times[r.bestTime].cumReturn.toFixed(0)}%`;
       const imp = `${r.bestImprovement >= 0 ? '+' : ''}${r.bestImprovement.toFixed(0)}%`;
-      console.log(`  │ ${name.padEnd(38)} │ ${String(r.tradingDays).padStart(5)} │ ${eod.padStart(9)} │ ${best.padStart(9)} │ ${imp.padStart(11)} │`);
+      const ddChange = r.times[r.bestTime].maxDD - r.eod.maxDD;
+      const ddChg = `${ddChange >= 0 ? '+' : ''}${ddChange.toFixed(0)}%`;
+      const timeStr = r.bestTime;  // Keep colon: "09:30"
+      // Checkmark outside table for >= 10% improvement (use rounded value to match display)
+      const highlight = Math.round(r.bestImprovement) >= 10;
+      const marker = highlight ? ' ✓' : '';
+
+      // Wrap long names across multiple rows
+      const nameLines = wrapText(r.name, maxNameWidth);
+      // First line with data
+      console.log(`  │ ${padEndDisplay(nameLines[0], nameCol - 2)} │ ${String(r.tradingDays).padStart(5)} │ ${timeStr.padStart(9)} │ ${ddChg.padStart(7)} │ ${eod.padStart(9)} │ ${best.padStart(9)} │ ${imp.padStart(11)} │${marker}`);
+      // Additional name lines (data columns empty)
+      for (let i = 1; i < nameLines.length; i++) {
+        console.log(`  │ ${padEndDisplay(nameLines[i], nameCol - 2)} │       │           │         │           │           │             │`);
+      }
+      // Add separator line between rows (not after last row)
+      if (idx < validResults.length - 1) {
+        console.log(`  ├${'─'.repeat(nameCol)}┼───────┼───────────┼─────────┼───────────┼───────────┼─────────────┤`);
+      }
     }
 
-    console.log('  └────────────────────────────────────────┴───────┴───────────┴───────────┴─────────────┘\n');
+    console.log(`  └${'─'.repeat(nameCol)}┴───────┴───────────┴─────────┴───────────┴───────────┴─────────────┘\n`);
 
     const addMorning = results.filter(r => r.recommendation === 'ADD_MORNING').length;
     const stickEOD = results.filter(r => r.recommendation === 'STICK_EOD').length;
     const marginal = results.filter(r => r.recommendation === 'MARGINAL').length;
+    const highlighted = results.filter(r => !r.error && Math.round(r.bestImprovement) >= 10).length;
 
-    console.log(`  Total: ${addMorning} should ADD MORNING | ${stickEOD} should STICK WITH EOD | ${marginal} MARGINAL\n`);
+    console.log(`  Total: ${addMorning} should ADD MORNING | ${stickEOD} should STICK WITH EOD | ${marginal} MARGINAL`);
+    if (highlighted > 0) {
+      console.log(`  ✓ = 10%+ improvement (${highlighted} strategies)`);
+    }
+    console.log('');
   }
 }
 
@@ -1762,15 +1837,406 @@ function printSingleTimeResults(results) {
   }
 
   if (results.filter(r => !r.error).length > 1) {
-    console.log(`\n${'═'.repeat(100)}`);
+    // Helper: get display width of string (emojis count as 2)
+    const getDisplayWidth = (str) => {
+      let width = 0;
+      for (const char of str) {
+        const code = char.codePointAt(0);
+        // Emoji ranges and other wide characters
+        if (code > 0x1F000 || (code >= 0x2600 && code <= 0x27BF) || (code >= 0x1F300 && code <= 0x1F9FF)) {
+          width += 2;
+        } else {
+          width += 1;
+        }
+      }
+      return width;
+    };
+
+    // Helper: pad string to display width (accounting for emojis)
+    const padEndDisplay = (str, targetWidth) => {
+      const currentWidth = getDisplayWidth(str);
+      const padding = Math.max(0, targetWidth - currentWidth);
+      return str + ' '.repeat(padding);
+    };
+
+    // Helper: wrap string into lines of max display width (respects emoji widths)
+    const wrapText = (str, maxWidth) => {
+      const lines = [];
+      let currentLine = '';
+      let currentWidth = 0;
+
+      for (const char of str) {
+        const code = char.codePointAt(0);
+        const charWidth = (code > 0x1F000 || (code >= 0x2600 && code <= 0x27BF) || (code >= 0x1F300 && code <= 0x1F9FF)) ? 2 : 1;
+
+        if (currentWidth + charWidth > maxWidth) {
+          lines.push(currentLine);
+          currentLine = char;
+          currentWidth = charWidth;
+        } else {
+          currentLine += char;
+          currentWidth += charWidth;
+        }
+      }
+      if (currentLine) lines.push(currentLine);
+      return lines;
+    };
+
+    // Fixed max width for name column to keep table readable
+    const MAX_NAME_WIDTH = 50;
+    const validResults = results.filter(r => !r.error);
+    const maxNameWidth = Math.min(MAX_NAME_WIDTH, Math.max(8, ...validResults.map(r => getDisplayWidth(r.name))));
+    const nameCol = maxNameWidth + 2;  // padding
+    const totalWidth = nameCol + 67;  // other columns width
+
+    console.log(`\n${'═'.repeat(totalWidth + 4)}`);
     console.log('  SUMMARY');
-    console.log(`${'═'.repeat(100)}\n`);
+    console.log(`${'═'.repeat(totalWidth + 4)}\n`);
+
+    // New column order: Strategy | Days | Best Time | DD Chg | EOD-Only | Best | Improvement
+    console.log(`  ┌${'─'.repeat(nameCol)}┬───────┬───────────┬─────────┬───────────┬───────────┬─────────────┐`);
+    console.log(`  │ ${'Strategy'.padEnd(nameCol - 2)} │ Days  │ Best Time │ DD Chg  │ EOD-Only  │   Best    │ Improvement │`);
+    console.log(`  ├${'─'.repeat(nameCol)}┼───────┼───────────┼─────────┼───────────┼───────────┼─────────────┤`);
+
+    for (let idx = 0; idx < validResults.length; idx++) {
+      const r = validResults[idx];
+      const eod = `${r.eod.cumReturn >= 0 ? '+' : ''}${r.eod.cumReturn.toFixed(0)}%`;
+      const bestRet = r.bestTime === CONFIG.EOD_TIME ? r.eod.cumReturn : r.times[r.bestTime].cumReturn;
+      const best = `${bestRet >= 0 ? '+' : ''}${bestRet.toFixed(0)}%`;
+      const imp = `${r.bestImprovement >= 0 ? '+' : ''}${r.bestImprovement.toFixed(0)}%`;
+      const bestDD = r.bestTime === CONFIG.EOD_TIME ? r.eod.maxDD : r.times[r.bestTime].maxDD;
+      const ddChange = bestDD - r.eod.maxDD;
+      const ddChg = `${ddChange >= 0 ? '+' : ''}${ddChange.toFixed(0)}%`;
+      const timeStr = r.bestTime;  // Keep colon: "09:30" or "15:45"
+      // Checkmark outside table for >= 10% improvement (use rounded value to match display)
+      const highlight = Math.round(r.bestImprovement) >= 10;
+      const marker = highlight ? ' ✓' : '';
+
+      // Wrap long names across multiple rows
+      const nameLines = wrapText(r.name, maxNameWidth);
+      // First line with data
+      console.log(`  │ ${padEndDisplay(nameLines[0], nameCol - 2)} │ ${String(r.tradingDays).padStart(5)} │ ${timeStr.padStart(9)} │ ${ddChg.padStart(7)} │ ${eod.padStart(9)} │ ${best.padStart(9)} │ ${imp.padStart(11)} │${marker}`);
+      // Additional name lines (data columns empty)
+      for (let i = 1; i < nameLines.length; i++) {
+        console.log(`  │ ${padEndDisplay(nameLines[i], nameCol - 2)} │       │           │         │           │           │             │`);
+      }
+      // Add separator line between rows (not after last row)
+      if (idx < validResults.length - 1) {
+        console.log(`  ├${'─'.repeat(nameCol)}┼───────┼───────────┼─────────┼───────────┼───────────┼─────────────┤`);
+      }
+    }
+
+    console.log(`  └${'─'.repeat(nameCol)}┴───────┴───────────┴─────────┴───────────┴───────────┴─────────────┘\n`);
 
     const useMorning = results.filter(r => r.recommendation === 'USE_MORNING').length;
     const keepEOD = results.filter(r => r.recommendation === 'KEEP_EOD').length;
+    const highlighted = results.filter(r => !r.error && Math.round(r.bestImprovement) >= 10).length;
 
-    console.log(`  Total: ${useMorning} could benefit from morning time | ${keepEOD} should keep EOD\n`);
+    console.log(`  Total: ${useMorning} could benefit from morning time | ${keepEOD} should keep EOD`);
+    if (highlighted > 0) {
+      console.log(`  ✓ = 10%+ improvement (${highlighted} strategies)`);
+    }
+    console.log('');
   }
+}
+
+// ============================================================================
+// COMBINED ANALYSIS
+// ============================================================================
+
+async function combinedAnalysis(ids, intradayDays, quiet = false) {
+  // Run both analyses
+  if (!quiet) console.log('\n  Running DUAL analysis...\n');
+  const dualResults = await dualTimeAnalysis(ids, intradayDays, true);
+
+  if (!quiet) console.log('\n  Running SINGLE analysis...\n');
+  const singleResults = await singleTimeAnalysis(ids, intradayDays, true);
+
+  // Combine results
+  const combined = [];
+  for (let i = 0; i < ids.length; i++) {
+    const dual = dualResults[i];
+    const single = singleResults[i];
+
+    if (dual.error || single.error) {
+      combined.push({
+        id: ids[i],
+        name: dual.name || single.name || 'Unknown',
+        error: dual.error || single.error
+      });
+      continue;
+    }
+
+    combined.push({
+      id: ids[i],
+      name: dual.name,
+      tradingDays: dual.tradingDays,
+      dateRange: dual.dateRange,
+      eod: dual.eod,
+      dual: {
+        bestTime: dual.bestTime,
+        bestReturn: dual.times[dual.bestTime].cumReturn,
+        bestDD: dual.times[dual.bestTime].maxDD,
+        improvement: dual.bestImprovement,
+        recommendation: dual.recommendation
+      },
+      single: {
+        bestTime: single.bestTime,
+        bestReturn: single.bestTime === CONFIG.EOD_TIME ? single.eod.cumReturn : single.times[single.bestTime].cumReturn,
+        bestDD: single.bestTime === CONFIG.EOD_TIME ? single.eod.maxDD : single.times[single.bestTime].maxDD,
+        improvement: single.bestImprovement,
+        recommendation: single.recommendation
+      }
+    });
+  }
+
+  return combined;
+}
+
+function printCombinedResults(results) {
+  console.log(`\n${'═'.repeat(120)}`);
+  console.log('  COMBINED ANALYSIS RESULTS (V3 - Dual + Single Comparison)');
+  console.log('  Compares: DUAL (morning + EOD) vs SINGLE (replace EOD with different time)');
+  console.log(`${'═'.repeat(120)}\n`);
+
+  // Detailed results per strategy
+  for (const r of results) {
+    if (r.error) {
+      console.log(`${r.name || r.id}: ERROR - ${r.error}\n`);
+      continue;
+    }
+
+    console.log(`${'─'.repeat(120)}`);
+    console.log(`STRATEGY: ${r.name}`);
+    console.log(`ID: ${r.id}`);
+    console.log(`Trading Days: ${r.tradingDays} | Date Range: ${r.dateRange}`);
+    console.log(`${'─'.repeat(120)}`);
+
+    console.log(`\n  BASELINE (EOD-Only @ ${CONFIG.EOD_TIME}):  Return: ${r.eod.cumReturn >= 0 ? '+' : ''}${r.eod.cumReturn.toFixed(1)}%  |  Max DD: ${r.eod.maxDD.toFixed(1)}%\n`);
+
+    console.log('  COMPARISON:');
+    console.log('  ┌─────────────┬─────────────┬─────────────────┬─────────────────┬─────────────────┐');
+    console.log('  │   Mode      │  Best Time  │   Cum Return    │   Max Drawdown  │  vs EOD-Only    │');
+    console.log('  ├─────────────┼─────────────┼─────────────────┼─────────────────┼─────────────────┤');
+
+    const dualRet = `${r.dual.bestReturn >= 0 ? '+' : ''}${r.dual.bestReturn.toFixed(1)}%`;
+    const dualDD = `${r.dual.bestDD.toFixed(1)}%`;
+    const dualImp = `${r.dual.improvement >= 0 ? '+' : ''}${r.dual.improvement.toFixed(1)}%`;
+    console.log(`  │  DUAL       │    ${r.dual.bestTime}    │  ${dualRet.padStart(12)}  │  ${dualDD.padStart(12)}  │  ${dualImp.padStart(12)}  │`);
+
+    const singleRet = `${r.single.bestReturn >= 0 ? '+' : ''}${r.single.bestReturn.toFixed(1)}%`;
+    const singleDD = `${r.single.bestDD.toFixed(1)}%`;
+    const singleImp = `${r.single.improvement >= 0 ? '+' : ''}${r.single.improvement.toFixed(1)}%`;
+    console.log(`  │  SINGLE     │    ${r.single.bestTime}    │  ${singleRet.padStart(12)}  │  ${singleDD.padStart(12)}  │  ${singleImp.padStart(12)}  │`);
+
+    console.log('  └─────────────┴─────────────┴─────────────────┴─────────────────┴─────────────────┘\n');
+
+    // Generate recommendation
+    const rec = generateCombinedRecommendation(r);
+    console.log(`  RECOMMENDATION: ${rec.text}`);
+    if (rec.warning) {
+      console.log(`  ⚠️  WARNING: ${rec.warning}`);
+    }
+    console.log('');
+  }
+
+  // Summary table
+  if (results.filter(r => !r.error).length > 1) {
+    printCombinedSummaryTable(results);
+  }
+}
+
+function generateCombinedRecommendation(r) {
+  const dualBetter = r.dual.improvement > r.single.improvement;
+  const singleBetter = r.single.improvement > r.dual.improvement;
+  const dualHasHighDD = r.dual.bestDD < -30; // DD is negative, so < -30 means worse than -30%
+  const singleHasHighDD = r.single.bestDD < -30;
+  const eodHasHighDD = r.eod.maxDD < -30;
+
+  // Check if improvement comes with significantly worse drawdown
+  const dualDDWorse = r.dual.bestDD < r.eod.maxDD - 5; // DD got 5%+ worse
+  const singleDDWorse = r.single.bestDD < r.eod.maxDD - 5;
+
+  // Thresholds
+  const significantImprovement = 5; // 5%+ improvement is significant
+  const marginalThreshold = 2; // Less than 2% is marginal
+
+  let text = '';
+  let warning = null;
+
+  // Neither mode helps much
+  if (r.dual.improvement < marginalThreshold && r.single.improvement < marginalThreshold) {
+    text = `STICK WITH EOD-ONLY - Neither mode shows significant improvement`;
+    return { text, warning };
+  }
+
+  // Dual is clearly better
+  if (dualBetter && r.dual.improvement >= significantImprovement) {
+    text = `USE DUAL MODE @ ${r.dual.bestTime} (+${r.dual.improvement.toFixed(1)}% improvement)`;
+    if (dualDDWorse) {
+      warning = `Drawdown increases from ${r.eod.maxDD.toFixed(1)}% to ${r.dual.bestDD.toFixed(1)}%`;
+    }
+    if (dualHasHighDD) {
+      warning = (warning ? warning + ' | ' : '') + `High drawdown risk (${r.dual.bestDD.toFixed(1)}%)`;
+    }
+    return { text, warning };
+  }
+
+  // Single is clearly better
+  if (singleBetter && r.single.improvement >= significantImprovement) {
+    text = `USE SINGLE MODE @ ${r.single.bestTime} (+${r.single.improvement.toFixed(1)}% improvement)`;
+    if (singleDDWorse) {
+      warning = `Drawdown increases from ${r.eod.maxDD.toFixed(1)}% to ${r.single.bestDD.toFixed(1)}%`;
+    }
+    if (singleHasHighDD) {
+      warning = (warning ? warning + ' | ' : '') + `High drawdown risk (${r.single.bestDD.toFixed(1)}%)`;
+    }
+    return { text, warning };
+  }
+
+  // Both show improvement but neither is clearly better
+  if (r.dual.improvement >= marginalThreshold && r.single.improvement >= marginalThreshold) {
+    // Prefer the one with better risk-adjusted profile (higher return with similar/better DD)
+    const dualRiskAdj = r.dual.improvement / Math.abs(r.dual.bestDD);
+    const singleRiskAdj = r.single.improvement / Math.abs(r.single.bestDD);
+
+    if (dualRiskAdj > singleRiskAdj * 1.1) { // Dual is 10%+ better risk-adjusted
+      text = `PREFER DUAL @ ${r.dual.bestTime} (better risk-adjusted return)`;
+    } else if (singleRiskAdj > dualRiskAdj * 1.1) {
+      text = `PREFER SINGLE @ ${r.single.bestTime} (better risk-adjusted return)`;
+    } else {
+      // They're similar - prefer the simpler option (single) or lower DD
+      if (r.single.bestDD > r.dual.bestDD) { // Less negative = better
+        text = `PREFER SINGLE @ ${r.single.bestTime} (lower drawdown: ${r.single.bestDD.toFixed(1)}% vs ${r.dual.bestDD.toFixed(1)}%)`;
+      } else {
+        text = `PREFER DUAL @ ${r.dual.bestTime} (higher return: +${r.dual.improvement.toFixed(1)}% vs +${r.single.improvement.toFixed(1)}%)`;
+      }
+    }
+    return { text, warning };
+  }
+
+  // One shows marginal improvement
+  if (r.dual.improvement >= marginalThreshold) {
+    text = `MARGINAL: DUAL @ ${r.dual.bestTime} shows modest improvement (+${r.dual.improvement.toFixed(1)}%)`;
+  } else if (r.single.improvement >= marginalThreshold) {
+    text = `MARGINAL: SINGLE @ ${r.single.bestTime} shows modest improvement (+${r.single.improvement.toFixed(1)}%)`;
+  } else {
+    text = `STICK WITH EOD-ONLY - No significant improvement from either mode`;
+  }
+
+  return { text, warning };
+}
+
+function printCombinedSummaryTable(results) {
+  // Helper functions (same as other tables)
+  const getDisplayWidth = (str) => {
+    let width = 0;
+    for (const char of str) {
+      const code = char.codePointAt(0);
+      if (code > 0x1F000 || (code >= 0x2600 && code <= 0x27BF) || (code >= 0x1F300 && code <= 0x1F9FF)) {
+        width += 2;
+      } else {
+        width += 1;
+      }
+    }
+    return width;
+  };
+
+  const padEndDisplay = (str, targetWidth) => {
+    const currentWidth = getDisplayWidth(str);
+    const padding = Math.max(0, targetWidth - currentWidth);
+    return str + ' '.repeat(padding);
+  };
+
+  const wrapText = (str, maxWidth) => {
+    const lines = [];
+    let currentLine = '';
+    let currentWidth = 0;
+    for (const char of str) {
+      const code = char.codePointAt(0);
+      const charWidth = (code > 0x1F000 || (code >= 0x2600 && code <= 0x27BF) || (code >= 0x1F300 && code <= 0x1F9FF)) ? 2 : 1;
+      if (currentWidth + charWidth > maxWidth) {
+        lines.push(currentLine);
+        currentLine = char;
+        currentWidth = charWidth;
+      } else {
+        currentLine += char;
+        currentWidth += charWidth;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+    return lines;
+  };
+
+  const MAX_NAME_WIDTH = 40;
+  const validResults = results.filter(r => !r.error);
+  const maxNameWidth = Math.min(MAX_NAME_WIDTH, Math.max(8, ...validResults.map(r => getDisplayWidth(r.name))));
+  const nameCol = maxNameWidth + 2;
+  const totalWidth = nameCol + 95;
+
+  console.log(`\n${'═'.repeat(totalWidth + 4)}`);
+  console.log('  COMBINED SUMMARY');
+  console.log(`${'═'.repeat(totalWidth + 4)}\n`);
+
+  // Column headers: Strategy | Days | EOD Ret | EOD DD | Dual Time | Dual Imp | Dual DD | Single Time | Single Imp | Single DD | Best
+  console.log(`  ┌${'─'.repeat(nameCol)}┬───────┬─────────┬─────────┬───────────┬──────────┬─────────┬─────────────┬────────────┬─────────┬────────────┐`);
+  console.log(`  │ ${'Strategy'.padEnd(nameCol - 2)} │ Days  │ EOD Ret │  EOD DD │ Dual Time │ Dual Imp │ Dual DD │ Single Time │ Single Imp │ Sngl DD │    Best    │`);
+  console.log(`  ├${'─'.repeat(nameCol)}┼───────┼─────────┼─────────┼───────────┼──────────┼─────────┼─────────────┼────────────┼─────────┼────────────┤`);
+
+  for (let idx = 0; idx < validResults.length; idx++) {
+    const r = validResults[idx];
+
+    const eodRet = `${r.eod.cumReturn >= 0 ? '+' : ''}${r.eod.cumReturn.toFixed(0)}%`;
+    const eodDD = `${r.eod.maxDD.toFixed(0)}%`;
+    const dualTime = r.dual.bestTime;
+    const dualImp = `${r.dual.improvement >= 0 ? '+' : ''}${r.dual.improvement.toFixed(0)}%`;
+    const dualDD = `${r.dual.bestDD.toFixed(0)}%`;
+    const singleTime = r.single.bestTime;
+    const singleImp = `${r.single.improvement >= 0 ? '+' : ''}${r.single.improvement.toFixed(0)}%`;
+    const singleDD = `${r.single.bestDD.toFixed(0)}%`;
+
+    // Determine best recommendation
+    let best = 'EOD';
+    let hasWarning = false;
+    const rec = generateCombinedRecommendation(r);
+    if (rec.text.includes('DUAL')) {
+      best = 'DUAL';
+    } else if (rec.text.includes('SINGLE')) {
+      best = 'SINGLE';
+    }
+    if (rec.warning) {
+      hasWarning = true;
+    }
+
+    const bestStr = hasWarning ? `${best} ⚠️` : best;
+
+    // Wrap long names
+    const nameLines = wrapText(r.name, maxNameWidth);
+
+    // First line with data
+    console.log(`  │ ${padEndDisplay(nameLines[0], nameCol - 2)} │ ${String(r.tradingDays).padStart(5)} │ ${eodRet.padStart(7)} │ ${eodDD.padStart(7)} │ ${dualTime.padStart(9)} │ ${dualImp.padStart(8)} │ ${dualDD.padStart(7)} │ ${singleTime.padStart(11)} │ ${singleImp.padStart(10)} │ ${singleDD.padStart(7)} │ ${bestStr.padStart(10)} │`);
+
+    // Additional name lines
+    for (let i = 1; i < nameLines.length; i++) {
+      console.log(`  │ ${padEndDisplay(nameLines[i], nameCol - 2)} │       │         │         │           │          │         │             │            │         │            │`);
+    }
+
+    // Separator between rows
+    if (idx < validResults.length - 1) {
+      console.log(`  ├${'─'.repeat(nameCol)}┼───────┼─────────┼─────────┼───────────┼──────────┼─────────┼─────────────┼────────────┼─────────┼────────────┤`);
+    }
+  }
+
+  console.log(`  └${'─'.repeat(nameCol)}┴───────┴─────────┴─────────┴───────────┴──────────┴─────────┴─────────────┴────────────┴─────────┴────────────┘\n`);
+
+  // Legend
+  console.log('  Legend:');
+  console.log('    • EOD Ret/DD = Baseline performance (EOD-only trading)');
+  console.log('    • Dual = Morning trade + EOD trade | Single = Replace EOD with different time');
+  console.log('    • Imp = Improvement vs EOD-only baseline');
+  console.log('    • Best = Recommended mode (EOD/DUAL/SINGLE)');
+  console.log('    • ⚠️ = High drawdown warning (DD > 30% or DD increased significantly)');
+  console.log('');
 }
 
 // ============================================================================
@@ -2549,12 +3015,16 @@ ${'─'.repeat(70)}
      "Should I REPLACE ${CONFIG.EOD_TIME} with a different time?"
      Simulates trading ONLY at a different time, skipping EOD entirely.
 
+  3. COMBINED ANALYSIS (Dual + Single)
+     Runs both analyses and recommends the best approach considering
+     return improvement AND drawdown risk.
+
 ${'─'.repeat(70)}
   SIGNAL SUB-ANALYSIS:
 ${'─'.repeat(70)}
 
-  3. Signal Flip Frequency  - How often do signals differ morning vs EOD?
-  4. Holdings Check by Date - What holdings at each time on a given day?
+  4. Signal Flip Frequency  - How often do signals differ morning vs EOD?
+  5. Holdings Check by Date - What holdings at each time on a given day?
 
 ${'─'.repeat(70)}
   DEBUGGING:
@@ -2605,6 +3075,20 @@ ${'─'.repeat(70)}
         }
 
         case '3': {
+          console.log('\nCOMBINED ANALYSIS (Dual + Single)');
+          console.log('Enter symphony ID(s). For multiple, separate with commas or spaces.\n');
+          const input = await ask(r, 'Symphony ID(s): ');
+          const ids = input.split(/[,\s]+/).filter(Boolean);
+
+          if (ids.length === 0) break;
+
+          const days = await askDateRange(r, ids[0]);
+          const results = await combinedAnalysis(ids, days);
+          printCombinedResults(results);
+          break;
+        }
+
+        case '4': {
           const id = await ask(r, 'Symphony ID: ');
           if (id) {
             const days = await askDateRange(r, id);
@@ -2613,7 +3097,7 @@ ${'─'.repeat(70)}
           break;
         }
 
-        case '4': {
+        case '5': {
           const id = await ask(r, 'Symphony ID: ');
           if (id) await dailyCheck(id, r);
           break;
@@ -2709,6 +3193,15 @@ async function main() {
         printSingleTimeResults(singleResults);
         break;
 
+      case 'combined':
+        if (ids.length === 0) {
+          console.log('Usage: node script.js combined <symphony_id> [id2] [id3]...');
+          return;
+        }
+        const combinedResults = await combinedAnalysis(ids, CONFIG.MAX_INTRADAY_DAYS);
+        printCombinedResults(combinedResults);
+        break;
+
       case 'flip':
         if (ids.length === 0) {
           console.log('Usage: node script.js flip <symphony_id>');
@@ -2746,16 +3239,19 @@ V3 IMPROVEMENTS:
   • Properly handles filter nodes (select top/bottom N)
 
 Usage:
-  node script.js                       Interactive menu
-  node script.js dual <id> [id2]...    Dual trade time analysis (morning + EOD)
-  node script.js single <id> [id2]...  Single time replacement analysis
-  node script.js flip <id>             Signal flip frequency
-  node script.js check <id>            Today's signal check
-  node script.js validate <id>         Indicator validation mode (debug)
+  node script.js                         Interactive menu
+  node script.js dual <id> [id2]...      Dual trade time analysis (morning + EOD)
+  node script.js single <id> [id2]...    Single time replacement analysis
+  node script.js combined <id> [id2]...  Combined analysis (dual + single comparison)
+  node script.js flip <id>               Signal flip frequency
+  node script.js check <id>              Today's signal check
+  node script.js validate <id>           Indicator validation mode (debug)
 
 Analysis Types:
-  DUAL:   "Should I trade at BOTH morning AND 3:45pm?"
-  SINGLE: "Should I REPLACE 3:45pm with a different time?"
+  DUAL:     "Should I trade at BOTH morning AND 3:45pm?"
+  SINGLE:   "Should I REPLACE 3:45pm with a different time?"
+  COMBINED: Runs both analyses and recommends best approach
+            considering return improvement AND drawdown risk.
 
 Debugging:
   VALIDATE: Trace through each IF/FILTER decision with indicator values
