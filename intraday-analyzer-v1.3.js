@@ -2049,13 +2049,13 @@ function printCombinedResults(results) {
 function generateCombinedRecommendation(r) {
   const dualBetter = r.dual.improvement > r.single.improvement;
   const singleBetter = r.single.improvement > r.dual.improvement;
-  const dualHasHighDD = r.dual.bestDD < -30; // DD is negative, so < -30 means worse than -30%
-  const singleHasHighDD = r.single.bestDD < -30;
-  const eodHasHighDD = r.eod.maxDD < -30;
+  const dualHasHighDD = r.dual.bestDD > 30; // DD is positive, so > 30 means worse than 30%
+  const singleHasHighDD = r.single.bestDD > 30;
+  const eodHasHighDD = r.eod.maxDD > 30;
 
   // Check if improvement comes with significantly worse drawdown
-  const dualDDWorse = r.dual.bestDD < r.eod.maxDD - 5; // DD got 5%+ worse
-  const singleDDWorse = r.single.bestDD < r.eod.maxDD - 5;
+  const dualDDWorse = r.dual.bestDD > r.eod.maxDD + 5; // DD got 5%+ worse (higher DD = worse)
+  const singleDDWorse = r.single.bestDD > r.eod.maxDD + 5;
 
   // Thresholds
   const significantImprovement = 5; // 5%+ improvement is significant
