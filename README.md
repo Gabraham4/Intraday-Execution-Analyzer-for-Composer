@@ -2,6 +2,11 @@
 
 Find the best time of day to execute your [Composer.trade](https://www.composer.trade) strategies. Instead of using Composer's default execution window, this tool backtests every time slot from 9:30 AM to 3:45 PM using real intraday price data and shows you which execution time would have delivered the best risk-adjusted returns.
 
+<!-- Screenshots: save images to docs/screenshots/ and uncomment these -->
+<!-- ![GUI Dashboard](docs/screenshots/gui-dashboard.png) -->
+<!-- ![Combined Analysis Report](docs/screenshots/combined-report.png) -->
+<!-- ![Walk-Forward Validation](docs/screenshots/walkforward.png) -->
+
 ## Features
 
 - **Three analysis modes** — Dual (run at optimal time vs. EOD), Single (compare all times head-to-head), Combined (both + cross-validation)
@@ -17,12 +22,13 @@ Find the best time of day to execute your [Composer.trade](https://www.composer.
 
 ```bash
 # 1. Clone
-git clone https://github.com/gabraham/Intraday-Execution-Analyzer-for-Composer.git
+git clone https://github.com/Gabraham4/Intraday-Execution-Analyzer-for-Composer.git
 cd Intraday-Execution-Analyzer-for-Composer
 
 # 2. Launch
 node app/gui-server.js
 # Or on macOS: double-click "Intraday Analyzer.command"
+# Or on Windows: double-click "Intraday Analyzer.bat"
 
 # 3. Open browser
 # http://localhost:3000
