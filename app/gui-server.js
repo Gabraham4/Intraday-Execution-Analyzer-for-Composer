@@ -22,7 +22,8 @@ let analysisRunning = false;
 // GUI SETTINGS PERSISTENCE
 // ============================================================================
 
-const GUI_SETTINGS_FILE = path.join(__dirname, 'gui-settings.json');
+const APP_DIR = analyzer.APP_DIR || __dirname;
+const GUI_SETTINGS_FILE = path.join(APP_DIR, 'gui-settings.json');
 
 function loadGUISettings() {
   try {
@@ -101,7 +102,7 @@ function sseSend(res, event, data) {
 // REPORT SAVING
 // ============================================================================
 
-const REPORTS_DIR = path.join(__dirname, 'reports');
+const REPORTS_DIR = path.join(APP_DIR, 'reports');
 
 function sanitizeFilename(name) {
   return name.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, ' ').trim();

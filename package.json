@@ -5,7 +5,15 @@
   "main": "app/gui-server.js",
   "scripts": {
     "start": "node app/gui-server.js",
-    "cli": "node app/intraday-analyzer-alpaca-v2.0.js"
+    "cli": "node app/intraday-analyzer-alpaca-v2.0.js",
+    "build": "pkg . --targets node18-macos-x64,node18-macos-arm64,node18-win-x64 --output dist/intraday-analyzer"
+  },
+  "bin": "app/gui-server.js",
+  "pkg": {
+    "assets": [
+      "app/intraday-analyzer-alpaca-v2.0.js"
+    ],
+    "outputPath": "dist"
   },
   "engines": {
     "node": ">=18.0.0"

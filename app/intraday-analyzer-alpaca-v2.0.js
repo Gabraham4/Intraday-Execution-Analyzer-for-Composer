@@ -30,8 +30,11 @@ const os = require('os');
 // CONFIG
 // ============================================================================
 
-const CONFIG_FILE = path.join(__dirname, 'analyzer-config.enc');
-const CONFIG_FILE_LEGACY = path.join(__dirname, 'analyzer-config.json');
+// In a pkg binary, __dirname is a read-only snapshot. Write data next to the executable instead.
+const APP_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
+
+const CONFIG_FILE = path.join(APP_DIR, 'analyzer-config.enc');
+const CONFIG_FILE_LEGACY = path.join(APP_DIR, 'analyzer-config.json');
 
 const CONFIG = {
   TEST_TIMES: ['09:30', '09:35', '09:45', '10:00', '10:30', '11:00', '12:00', '13:00', '13:45'],
@@ -2320,7 +2323,7 @@ async function fetchAllDataHybrid(tickers, intradayDays, dailyDays, quiet = fals
 // PERSISTENT DISK CACHE — saves fetched price data per-ticker across runs
 // ============================================================================
 
-const CACHE_BASE = path.join(__dirname, 'cache');
+const CACHE_BASE = path.join(APP_DIR, 'cache');
 
 function getDiskCacheDir(type) {
   // type: 'intraday' or 'daily'
@@ -6263,6 +6266,7 @@ module.exports = {
   clearTickerDataCache,
   saveConfig,
   loadConfig,
+  APP_DIR,
 };
 
 if (require.main === module) {
