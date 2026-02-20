@@ -1,267 +1,121 @@
 # Intraday Execution Analyzer for Composer
 
-A standalone tool to analyze whether executing your [Composer.trade](https://composer.trade) symphony at different times of day improves returns compared to the default 3:45-4:00 PM trading window auto-rebalance.
-
-**No API keys required** - uses Yahoo Finance public data
-
----
-
-## What This Tool Does
-
-Composer symphonies auto-execute during the 3:45-4:00 PM ET trading window. But what if executing earlier in the day would give better results? This tool simulates your strategy at multiple intraday times and compares outcomes.
-
-**Analysis Times:** 9:30, 9:35, 9:45, 10:00, 10:30, 11:00, 12:00, 13:45, and your configured EOD time (default 15:45)
-
----
+Find the best time of day to execute your [Composer.trade](https://www.composer.trade) strategies. Instead of using Composer's default execution window, this tool backtests every time slot from 9:30 AM to 3:45 PM using real intraday price data and shows you which execution time would have delivered the best risk-adjusted returns.
 
 ## Features
 
-- **Dual Trade Time Analysis** - "Should I trade at BOTH morning AND 3:45pm?"
-- **Single Time Replacement** - "Should I REPLACE 3:45pm with a different time?"
-- **Combined Analysis (NEW)** - Runs both analyses and recommends the best approach considering return improvement AND drawdown risk
-- **Signal Flip Frequency** - How often do signals differ morning vs EOD?
-- **Holdings Check by Date** - What holdings would you have at each time on a given day?
-- **Indicator Validation** - Debug mode to trace through IF/FILTER decisions
-- **Customizable EOD Time** - Set your baseline to 3:45, 3:50, 3:55, or 4:00 PM
-
----
+- **Three analysis modes** — Dual (run at optimal time vs. EOD), Single (compare all times head-to-head), Combined (both + cross-validation)
+- **Walk-forward validation** — Rolling out-of-sample consistency check to distinguish real timing alpha from overfitting
+- **Robustness tiers** — Automated STRONG / MODERATE / WEAK / NONE classification based on peak shape, mode agreement, and walk-forward consistency
+- **Web GUI** — Browser-based dashboard with interactive charts and HTML report export
+- **Full CLI** — Scriptable command-line interface for automation and batch analysis
+- **Alpaca data** — Up to 2 years of 5-minute intraday bars via free Alpaca paper account (falls back to Yahoo Finance if no keys configured)
+- **Composer API integration** — Optionally connect your Composer account to browse and select strategies directly from your portfolio/watchlist
+- **Zero dependencies** — Pure Node.js, no npm install required
 
 ## Quick Start
 
-### Option 1: Run with Node.js
-
 ```bash
-# Prerequisites: Install Node.js 18+ from https://nodejs.org/
-
-# Clone the repo
-git clone https://github.com/Gabraham4/Intraday-Execution-Analyzer-for-Composer.git
+# 1. Clone
+git clone https://github.com/gabraham/Intraday-Execution-Analyzer-for-Composer.git
 cd Intraday-Execution-Analyzer-for-Composer
 
-# Run interactively
-node intraday-analyzer-v1.3.js
+# 2. Launch
+node app/gui-server.js
+# Or on macOS: double-click "Intraday Analyzer.command"
 
-# Or with symphony ID directly
-node intraday-analyzer-v1.3.js dual <symphony_id>
+# 3. Open browser
+# http://localhost:3000
 ```
 
-### Option 2: Standalone Executables (No Node.js Required)
+On first launch, the Settings page will prompt you for API keys.
 
-Download pre-built executables from [Releases](https://github.com/Gabraham4/Intraday-Execution-Analyzer-for-Composer/releases):
+## Getting API Keys
 
-| Platform | File |
-|----------|------|
-| Windows | `intraday-analyzer-win.zip` |
-| macOS (Intel) | `intraday-analyzer-macos-x64.zip` |
-| macOS (Apple Silicon) | `intraday-analyzer-macos-arm64.zip` |
-| Linux | `intraday-analyzer-linux.zip` |
+### Alpaca (recommended — free, 2 minutes)
 
-**macOS Users:** After extracting, you may need to right-click → Open the first time, or run `xattr -cr intraday-analyzer-*` to bypass Gatekeeper.
+Alpaca provides 2 years of intraday price data for free via a paper trading account.
 
----
+1. Go to [alpaca.markets](https://alpaca.markets) and create a free account
+2. Switch to **Paper Trading** in the dashboard
+3. Go to **API Keys** and click **Generate New Key**
+4. Copy the **API Key** (starts with `PK`) and **Secret Key**
+5. Paste both into the Settings page in the analyzer
 
-## Finding Your Symphony ID
+Without Alpaca keys, the analyzer falls back to Yahoo Finance (~60 days of intraday data).
 
-From your symphony URL:
-```
-https://app.composer.trade/symphony/VfLXEvcG8VXvw52N8g9l/factsheet
-                                    ^^^^^^^^^^^^^^^^^^
-                                    This is your Symphony ID
-```
+### Composer API (optional)
 
----
+Composer keys let the analyzer browse your portfolio and watchlist to select strategies. Without them, you can still paste strategy IDs manually.
 
-## Menu Options
+1. Go to [app.composer.trade](https://app.composer.trade)
+2. Open **Settings** > **API Keys**
+3. Create a new key pair
+4. Paste the **Key ID** and **Secret** into the analyzer's Settings page
 
-```
-══════════════════════════════════════════════════════════════════════
-  MAIN ANALYSIS OPTIONS:
-──────────────────────────────────────────────────────────────────────
+## Usage
 
-  1. DUAL TRADE TIME ANALYSIS
-     "Should I trade at BOTH morning AND Composer auto-EOD (15:45)?"
+### Web GUI
 
-  2. SINGLE TIME REPLACEMENT ANALYSIS
-     "Should I REPLACE 15:45 with a different time?"
+1. Launch with `node app/gui-server.js`
+2. **Settings** (gear icon) — enter your API keys
+3. **Sidebar** — click "Load Portfolio" or "Load Watchlist" to see your strategies (requires Composer keys), or paste strategy IDs manually
+4. **Select** strategies using checkboxes
+5. **Choose mode** — Dual, Single, or Combined
+6. **Enable Walk-Forward** (checkbox, on by default) for out-of-sample validation
+7. Click **Run Analysis**
+8. View results inline or export as an HTML report
 
-  3. COMBINED ANALYSIS (Dual + Single)
-     Runs both analyses and recommends the best approach considering
-     return improvement AND drawdown risk.
-
-──────────────────────────────────────────────────────────────────────
-  SIGNAL SUB-ANALYSIS:
-──────────────────────────────────────────────────────────────────────
-
-  4. Signal Flip Frequency  - How often do signals differ morning vs EOD?
-  5. Holdings Check by Date - What holdings at each time on a given day?
-
-──────────────────────────────────────────────────────────────────────
-  DEBUGGING:
-──────────────────────────────────────────────────────────────────────
-
-  6. Indicator Validation   - Debug indicator values vs Composer (trace mode)
-
-──────────────────────────────────────────────────────────────────────
-  SETTINGS:
-──────────────────────────────────────────────────────────────────────
-
-  7. Change EOD Time        - Customize your baseline EOD time
-```
-
-### Option 7: Customize EOD Time
-
-By default, the tool compares against 15:45 (3:45 PM). Use **Option 7** to set your baseline EOD time to 3:45, 3:50, 3:55, or 4:00 PM depending on when your trades tend to execute within Composer's trading window.
-
----
-
-## Command Line Usage
+### CLI
 
 ```bash
-# Dual trade time analysis
-node intraday-analyzer-v1.3.js dual <symphony_id>
+# Interactive menu
+node app/intraday-analyzer-alpaca-v2.0.js
 
-# Single time replacement analysis
-node intraday-analyzer-v1.3.js single <symphony_id>
+# Direct commands
+node app/intraday-analyzer-alpaca-v2.0.js dual <symphonyId>
+node app/intraday-analyzer-alpaca-v2.0.js single <symphonyId>
+node app/intraday-analyzer-alpaca-v2.0.js combined <symphonyId>
 
-# Combined analysis (both dual and single)
-node intraday-analyzer-v1.3.js combined <symphony_id>
+# With walk-forward
+node app/intraday-analyzer-alpaca-v2.0.js combined <symphonyId> --walkforward
 
-# Signal flip frequency
-node intraday-analyzer-v1.3.js flip <symphony_id>
-
-# Today's holdings check
-node intraday-analyzer-v1.3.js check <symphony_id>
-
-# Indicator validation (debug)
-node intraday-analyzer-v1.3.js validate <symphony_id>
+# Configure API keys
+node app/intraday-analyzer-alpaca-v2.0.js config
 ```
 
----
+### Using Strategy IDs Without Composer API
 
-## Important Notes
+You don't need Composer API keys to run analyses. To get a strategy's ID:
 
-### Data Limitations
-
-- **Yahoo Finance data goes back ~60 days only** (~40 trading days)
-- For longer historical analysis, I have a TwelveData version available - reach out if interested
-
-### Complex Strategy Caveats
-
-- Very complex symphonies (100+ IF nodes, deeply nested structures) may occasionally produce slightly different holdings than Composer
-- This is typically due to minor data source differences between Yahoo Finance and Composer's Xignite feed
-- The tool works best with symphonies under ~50 IF/FILTER nodes
-- Always verify with Option 5 (Holdings Check) against your actual Composer holdings
-
-### Verified Indicators
-
-All indicator calculations have been verified against Composer's actual behavior:
-
-| Indicator | Formula | Status |
-|-----------|---------|--------|
-| RSI | Wilder's smoothing method | Verified |
-| Cumulative Return | (end - start) / start | Verified |
-| Moving Average of Return | avg(daily returns) | Verified |
-| SMA (Price) | Simple average of prices | Verified |
-| EMA (Price) | Smoothing factor 2.0 | Verified |
-| Standard Deviation | Population std dev | Verified |
-| Max Drawdown | Peak-to-trough | Verified |
-
----
+1. Open the strategy in Composer's web app
+2. The URL will be: `https://app.composer.trade/symphony/ABC123XYZ/details`
+3. Copy the ID from the URL (e.g., `ABC123XYZ`)
+4. Paste it directly into the GUI's strategy input, or pass it as a CLI argument
 
 ## How It Works
 
-1. **Fetches** your symphony structure from Composer's public API
-2. **Downloads** intraday + daily price data from Yahoo Finance
-3. **Simulates** your strategy logic at each analysis time
-4. **Compares** holdings and calculates theoretical returns
-5. **Generates** recommendations based on performance differences
+For each strategy, the analyzer:
 
-### Why Signals Can Flip
+1. **Fetches the strategy's ticker allocation** from Composer's public API
+2. **Downloads intraday price data** for all tickers (5-min or 15-min bars from Alpaca)
+3. **Re-evaluates the strategy's conditions** at each candidate time using prices available at that moment
+4. **Simulates execution** — enters positions at the candidate time's prices instead of end-of-day
+5. **Compares returns** across all time slots to find the optimal execution window
+6. **Validates with walk-forward** — runs rolling out-of-sample windows to check if the edge persists
 
-Composer calculates indicators using daily closes + today's current price. As price moves throughout the day, the "today" portion changes, which can flip signals.
+## Security
 
-```
-Example for 14-day RSI at 10:30am:
-  prices[0..12]  = Last 13 daily closes
-  prices[13]     = Current price at 10:30am  <-- This changes!
-```
+- API keys are **encrypted at rest** using AES-256-GCM with a machine-derived key
+- Keys are stored in `app/analyzer-config.enc` (gitignored)
+- Keys are **never transmitted** except directly to the Alpaca and Composer APIs over HTTPS
+- Environment variables (`ALPACA_API_KEY`, `ALPACA_API_SECRET`, `COMPOSER_KEY_ID`, `COMPOSER_SECRET`) can be used instead of file storage
 
----
+## Requirements
 
-## Interpreting Results
-
-### Recommendations
-
-| Label | Meaning |
-|-------|---------|
-| ADD_MORNING | Dual-time improvement > +5% vs EOD-only |
-| STICK_EOD | Dual-time worse by > 5% vs EOD-only |
-| MARGINAL | Difference within +/- 5% |
-
-### Combined Analysis Recommendations
-
-The Combined Analysis (Option 3) considers both return improvement AND drawdown risk:
-
-- Flags strategies with high drawdown (>30%)
-- Warns if drawdown increases significantly (>5% worse)
-- Compares risk-adjusted returns between dual and single approaches
-- Recommends the best overall approach
-
-### Confidence Level
-
-- Results are directional indicators, not guarantees
-- ~40 trading days means limited statistical significance
-- Use for "should I experiment?" decisions, not "this will definitely work"
-
----
-
-## Limitations
-
-| Feature | How Modeled |
-|---------|-------------|
-| wt-inverse-vol | Treated as equal-weight |
-| Transaction costs | Not modeled (results optimistic) |
-| Bid-ask spread | Not modeled |
-| Yahoo intraday limit | ~60 calendar days (~40 trading) |
-
----
-
-## Troubleshooting
-
-| Error | Solution |
-|-------|----------|
-| "No data available" | Ticker may be delisted or have different Yahoo symbol |
-| "Not enough trading days" | Need at least 5 trading days |
-| "JSON parse error" | Rate limiting - wait and retry |
-| Holdings don't match | Use Option 5 to debug; complex strategies may have edge cases |
-
----
-
-## Version History
-
-- **v1.3.1** - Added Combined Analysis mode, added 9:35am test time, improved summary tables with row separators and multi-row name support
-- **v1.3** - Fixed Moving Average of Return formula (empirically verified), improved filter handling
-- **v3** - Major rewrite: daily bars for indicators (matches Composer), intraday price for "today"
-- **v2** - Added signal flip analysis
-- **v1** - Initial release
-
----
+- **Node.js 18+** (uses built-in `crypto`, `http`, `https` modules)
+- No npm dependencies
 
 ## Disclaimer
 
-This tool is for **educational and research purposes only**. Past performance does not guarantee future results. Always do your own due diligence before making investment decisions.
-
----
-
-## Contributing
-
-Issues and PRs welcome! If you find a strategy where the analyzer produces different results than Composer, please open an issue with the symphony ID.
-
----
-
-## License
-
-MIT - Use at your own risk.
-
----
-
-*Built for the Composer community*
+This tool is for informational and educational purposes only. It is not financial advice. Past performance of any execution timing strategy does not guarantee future results. Use at your own risk.

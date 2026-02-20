@@ -2,3 +2,10 @@ node_modules/
 dist/
 *.log
 .DS_Store
+analyzer-config.json
+analyzer-config.enc
+gui-settings.json
+cache/
+reports/
+walkforward_csvs/
+archive/
