@@ -1060,7 +1060,7 @@ const FRONTEND_HTML = `<!DOCTYPE html>
       <div class="modal-row">
         <label>Alpaca API Key</label>
         <div class="input-wrap">
-          <input type="password" id="keyAlpacaKey" placeholder="PKRJFSJ4...">
+          <input type="password" id="keyAlpacaKey" placeholder="PK...">
           <button class="toggle-vis" onclick="toggleVis(this)">Show</button>
         </div>
         <div class="hint" id="hintAlpacaKey"></div>
