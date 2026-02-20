@@ -66,6 +66,8 @@ Composer keys let the analyzer browse your portfolio and watchlist to select str
 7. Click **Run Analysis**
 8. View results inline or export as an HTML report
 
+> **First run warning:** The first analysis for a strategy downloads up to 2 years of intraday price data for every ticker in the strategy. For complex strategies with many tickers, this can take **several hours**. It's fine to leave it running overnight. After the first run, data is cached locally and subsequent analyses are much faster.
+
 ### CLI
 
 ```bash
