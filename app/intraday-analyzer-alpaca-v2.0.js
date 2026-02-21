@@ -334,11 +334,11 @@ function normalizeTickerYahoo(ticker) {
   return normalized;
 }
 
-// Normalize Composer ticker format for Alpaca
-// EQUITIES::XLU//USD -> XLU
-// CRYPTO::BTC//USD -> BTC/USD (Alpaca crypto uses slash)
-// BRK/B -> BRK.B (Alpaca uses dot for share classes)
-// XLU -> XLU (no change)
+// Normalize ticker for Alpaca API
+// Handles both raw Composer format AND pre-Yahoo-normalized format:
+//   EQUITIES::XLU//USD -> XLU     |  XLU -> XLU
+//   CRYPTO::BTC//USD -> BTC/USD   |  BTC-USD -> BTC/USD
+//   BRK/B -> BRK.B               |  BRK-B -> BRK.B
 function normalizeTickerAlpaca(ticker) {
   if (!ticker) return ticker;
 
@@ -352,9 +352,20 @@ function normalizeTickerAlpaca(ticker) {
     normalized = normalized.replace('CRYPTO::', '').replace('//', '/');
   }
 
-  // BRK/B -> BRK.B (but not crypto which has single slash like BTC/USD)
+  // Handle Yahoo-normalized crypto: BTC-USD -> BTC/USD (Alpaca uses slash)
+  if (normalized.endsWith('-USD')) {
+    normalized = normalized.replace('-USD', '/USD');
+  }
+
+  // BRK/B -> BRK.B (but not crypto which has slash like BTC/USD)
   if (normalized.includes('/') && !normalized.includes('USD')) {
     normalized = normalized.replace('/', '.');
+  }
+
+  // Handle Yahoo-normalized share classes: BRK-B -> BRK.B
+  // Only match single letter after hyphen (share class), not crypto like BTC-USD (already handled)
+  if (normalized.includes('-') && /^[A-Z]+-[A-Z]$/.test(normalized)) {
+    normalized = normalized.replace('-', '.');
   }
 
   return normalized;
@@ -761,8 +772,7 @@ async function getYahooIntradayData(ticker, days) {
             for (let i = 0; i < ts.length; i++) {
               if (!q.close?.[i]) continue;
               const dt = new Date(ts[i] * 1000);
-              const d = dt.toISOString().split('T')[0];
-              const t = dt.toTimeString().slice(0, 5);
+              const { date: d, time: t } = utcToEastern(dt.toISOString());
               if (!byDT[d]) byDT[d] = {};
               byDT[d][t] = { open: q.open?.[i], high: q.high?.[i], low: q.low?.[i], close: q.close[i] };
             }
@@ -1263,7 +1273,8 @@ function getIntradayPrice(ticker, intradayData, date, time, dailyData = null) {
 
   const dd = intradayData[ticker]?.byDT?.[date];
   if (!dd) {
-    if (dailyData) {
+    // Only fall back to daily close for EOD times (>= 15:45) to avoid lookahead bias
+    if (dailyData && time >= '15:45') {
       const dailyClose = dailyData[ticker]?.byDate?.[date]?.close;
       if (dailyClose) return dailyClose;
     }
