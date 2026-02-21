@@ -2821,6 +2821,8 @@ function runDualTimeBacktest(score, dailyData, intradayData, tradingDays, mornin
       } else if (prevDate && holdings.length > 0) {
         holdings = getDriftedWeights(holdings, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime);
       }
+    } else {
+      holdings = []; // Cash signal: liquidate
     }
 
     // LEG 2: Intraday - morning holdings held until EOD
@@ -2847,6 +2849,8 @@ function runDualTimeBacktest(score, dailyData, intradayData, tradingDays, mornin
       } else {
         holdings = getDriftedWeights(holdings, dailyData, intradayData, date, date, morningTime, CONFIG.EOD_TIME);
       }
+    } else {
+      holdings = []; // Cash signal: liquidate
     }
 
     equityCurve.push(equity);
@@ -2903,6 +2907,8 @@ function runEODOnlyBacktest(score, dailyData, intradayData, tradingDays, rebalan
       } else if (prevDate && holdings.length > 0) {
         holdings = getDriftedWeights(holdings, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, CONFIG.EOD_TIME);
       }
+    } else {
+      holdings = []; // Cash signal: liquidate
     }
   }
 
@@ -2954,6 +2960,8 @@ function runSingleTimeBacktest(score, dailyData, intradayData, tradingDays, trad
       } else if (prevDate && holdings.length > 0) {
         holdings = getDriftedWeights(holdings, dailyData, intradayData, prevDate, date, tradeTime, tradeTime);
       }
+    } else {
+      holdings = []; // Cash signal: liquidate
     }
   }
 
@@ -3023,6 +3031,8 @@ function runDualVsEodBacktestDaily(score, dailyData, intradayData, tradingDays, 
       } else if (prevDate && dualHoldings.length > 0) {
         dualHoldings = getDriftedWeights(dualHoldings, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime);
       }
+    } else {
+      dualHoldings = []; // Cash signal: liquidate
     }
 
     // LEG 2: Intraday - morning holdings held until EOD
@@ -3047,6 +3057,8 @@ function runDualVsEodBacktestDaily(score, dailyData, intradayData, tradingDays, 
       } else {
         dualHoldings = getDriftedWeights(dualHoldings, dailyData, intradayData, date, date, morningTime, CONFIG.EOD_TIME);
       }
+    } else {
+      dualHoldings = []; // Cash signal: liquidate
     }
 
     if (dualEquity > dualPeak) dualPeak = dualEquity;
@@ -3074,6 +3086,8 @@ function runDualVsEodBacktestDaily(score, dailyData, intradayData, tradingDays, 
       } else if (prevDate && eodHoldings.length > 0) {
         eodHoldings = getDriftedWeights(eodHoldings, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, CONFIG.EOD_TIME);
       }
+    } else {
+      eodHoldings = []; // Cash signal: liquidate
     }
 
     if (eodEquity > eodPeak) eodPeak = eodEquity;
@@ -3147,6 +3161,8 @@ function runSingleVsEodBacktestDaily(score, dailyData, intradayData, tradingDays
       } else if (prevDate && singleHoldings.length > 0) {
         singleHoldings = getDriftedWeights(singleHoldings, dailyData, intradayData, prevDate, date, tradeTime, tradeTime);
       }
+    } else {
+      singleHoldings = []; // Cash signal: liquidate
     }
 
     if (singleEquity > singlePeak) singlePeak = singleEquity;
@@ -3176,6 +3192,8 @@ function runSingleVsEodBacktestDaily(score, dailyData, intradayData, tradingDays
       } else if (prevDate && eodHoldings.length > 0) {
         eodHoldings = getDriftedWeights(eodHoldings, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, CONFIG.EOD_TIME);
       }
+    } else {
+      eodHoldings = []; // Cash signal: liquidate
     }
 
     if (eodEquity > eodPeak) eodPeak = eodEquity;
@@ -4220,7 +4238,7 @@ function generateCombinedRecommendation(r) {
       text = `PREFER SINGLE @ ${r.single.bestTime} (better risk-adjusted return)`;
     } else {
       // They're similar - prefer the simpler option (single) or lower DD
-      if (r.single.bestDD > r.dual.bestDD) { // Less negative = better
+      if (r.single.bestDD < r.dual.bestDD) { // Lower DD value = better
         text = `PREFER SINGLE @ ${r.single.bestTime} (lower drawdown: ${r.single.bestDD.toFixed(1)}% vs ${r.dual.bestDD.toFixed(1)}%)`;
       } else {
         text = `PREFER DUAL @ ${r.dual.bestTime} (higher return: +${r.dual.improvement.toFixed(1)}% vs +${r.single.improvement.toFixed(1)}%)`;
@@ -5785,7 +5803,7 @@ async function main() {
             console.log(`${String(i).padEnd(4)} ${date.padEnd(12)} (first day - no return)`);
           }
 
-          if (selection.length > 0) rdHoldings = selection;
+          rdHoldings = selection; // Empty selection = cash signal
 
           // Log new selection
           const selStr = selection.map(a => `${a.ticker}(${(a.weight*100).toFixed(0)}%)`).join(',');

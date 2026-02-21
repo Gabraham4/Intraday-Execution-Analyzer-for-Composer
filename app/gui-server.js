@@ -1512,10 +1512,11 @@ function renderSummaryTable(results, mode) {
   // Build rows data
   var rows = results.map(function(r) {
     var eodRet = r.eod.cumReturn;
-    var bestRet = r.times[r.bestTime].cumReturn;
+    var bestData = r.times[r.bestTime] || r.eod;
+    var bestRet = bestData.cumReturn;
     var diff = r.bestImprovement;
     var pctImprove = eodRet !== 0 ? (diff / Math.abs(eodRet)) * 100 : 0;
-    var ddChange = r.times[r.bestTime].maxDD - r.eod.maxDD;
+    var ddChange = bestData.maxDD - r.eod.maxDD;
     return {
       id: r.id, name: r.name, from: fmtStartDate(r.dateRange), days: r.tradingDays,
       dateRange: r.dateRange, bestTime: r.bestTime,
