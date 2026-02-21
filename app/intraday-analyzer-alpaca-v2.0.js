@@ -1496,10 +1496,13 @@ function getAssetsWithWeights(node, dailyData, intradayData, date, time, parentW
               // syntheticPrice stays the same
             } else {
               // Compute weighted portfolio return for this day→next day
+              // For the eval date, use intraday price at evalTime to avoid lookahead
               let portfolioReturn = 0;
               for (const h of holdings) {
                 const todayClose = dailyData[h.ticker]?.byDate?.[d]?.close;
-                const nextClose = dailyData[h.ticker]?.byDate?.[nextD]?.close;
+                const nextClose = nextD === date
+                  ? getIntradayPrice(h.ticker, intradayData, nextD, time, dailyData)
+                  : dailyData[h.ticker]?.byDate?.[nextD]?.close;
                 if (todayClose && nextClose && todayClose > 0) {
                   portfolioReturn += h.weight * ((nextClose - todayClose) / todayClose);
                 }
