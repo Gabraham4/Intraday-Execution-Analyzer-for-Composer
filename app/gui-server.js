@@ -72,7 +72,7 @@ function parseBody(req) {
   return new Promise((resolve, reject) => {
     if (req.method !== 'POST') return resolve(null);
     let body = '';
-    req.on('data', chunk => { body += chunk; if (body.length > 1e6) reject(new Error('Body too large')); });
+    req.on('data', chunk => { body += chunk; if (body.length > 1e6) { req.destroy(); reject(new Error('Body too large')); } });
     req.on('end', () => {
       try { resolve(body ? JSON.parse(body) : {}); }
       catch { reject(new Error('Invalid JSON')); }
@@ -112,7 +112,12 @@ function saveReport(result, mode) {
   try {
     if (!result || result.error || !result.name) return;
     if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
-    const filename = sanitizeFilename(result.name) + ' (' + mode + ').html';
+    // Include settings in filename so different configs don't overwrite each other
+    const eod = (analyzer.CONFIG && analyzer.CONFIG.EOD_TIME) || '15:45';
+    const tf = (analyzer.CONFIG && analyzer.CONFIG.ALPACA_TIMEFRAME) || '15Min';
+    const wf = (analyzer.CONFIG && analyzer.CONFIG.walkforward) ? 'wf' : 'nowf';
+    const settings = tf + ' ' + eod.replace(':', '') + ' ' + wf;
+    const filename = sanitizeFilename(result.name) + ' (' + mode + ') ' + settings + '.html';
     const html = buildReportHTML(result, mode);
     fs.writeFileSync(path.join(REPORTS_DIR, filename), html);
   } catch (e) {
@@ -223,6 +228,13 @@ function buildReportHTML(r, mode) {
       : 'Marginal difference \u2014 EOD-only is simpler';
     body += '<div class="' + recClass + '">' + recText + '</div>';
 
+    // Composite score breakdown
+    if (r.compositeScores && r.bestTime && r.compositeScores[r.bestTime]) {
+      var cs = r.compositeScores[r.bestTime];
+      var wfPart = cs.wfScore !== null ? ' &middot; WF ' + cs.wfScore : '';
+      body += '<div class="meta" style="margin-top:6px;font-size:12px">Selection score: <strong>' + cs.total + '/100</strong> (Return ' + cs.returnScore + ', DD ' + cs.ddScore + ', Neighbors ' + cs.neighborScore + wfPart + ')</div>';
+    }
+
     // Walk-forward
     if (r.walkforward) {
       var wfLabel = mode === 'dual' ? 'Dual' : '@' + r.bestTime;
@@ -331,6 +343,22 @@ function buildReportHTML(r, mode) {
       : bestImp < -5 ? 'Both modes show worse results \u2014 keep EOD'
       : 'Marginal difference \u2014 EOD-only is simpler';
     body += '<div class="' + cRecClass + '">' + cRecText + '</div>';
+
+    // Composite score breakdowns
+    var cParts = [];
+    if (r.dual && r.dual.compositeScores && r.dual.bestTime && r.dual.compositeScores[r.dual.bestTime]) {
+      var dcs = r.dual.compositeScores[r.dual.bestTime];
+      var dwfP = dcs.wfScore !== null ? ' &middot; WF ' + dcs.wfScore : '';
+      cParts.push('Dual @ ' + r.dual.bestTime + ': <strong>' + dcs.total + '/100</strong> (Ret ' + dcs.returnScore + ', DD ' + dcs.ddScore + ', Nbr ' + dcs.neighborScore + dwfP + ')');
+    }
+    if (r.single && r.single.compositeScores && r.single.bestTime && r.single.compositeScores[r.single.bestTime]) {
+      var scs = r.single.compositeScores[r.single.bestTime];
+      var swfP = scs.wfScore !== null ? ' &middot; WF ' + scs.wfScore : '';
+      cParts.push('Single @ ' + r.single.bestTime + ': <strong>' + scs.total + '/100</strong> (Ret ' + scs.returnScore + ', DD ' + scs.ddScore + ', Nbr ' + scs.neighborScore + swfP + ')');
+    }
+    if (cParts.length > 0) {
+      body += '<div class="meta" style="margin-top:6px;font-size:12px">' + cParts.join(' &nbsp;|&nbsp; ') + '</div>';
+    }
 
     // Walk-forward for combined
     if (r.dual && r.dual.walkforward) {
@@ -493,7 +521,7 @@ async function handleRequest(req, res) {
     // --- API: Run analysis (SSE stream) ---
     if (pathname === '/api/analyze' && req.method === 'POST') {
       const body = await parseBody(req);
-      const { ids, mode = 'dual', walkforward = false, wfWindowSize, wfStepSize } = body || {};
+      const { ids, mode = 'dual', walkforward = false, wfWindowSize, wfStepSize, dateStart, dateEnd } = body || {};
 
       if (!ids || !Array.isArray(ids) || ids.length === 0) {
         return json({ error: 'ids array required' }, 400);
@@ -508,6 +536,10 @@ async function handleRequest(req, res) {
       analyzer.CONFIG.walkforward = !!walkforward;
       if (wfWindowSize) analyzer.CONFIG.wfWindowSize = parseInt(wfWindowSize) || 21;
       if (wfStepSize) analyzer.CONFIG.wfStepSize = parseInt(wfStepSize) || 21;
+
+      // Custom date range (null = use all available data)
+      analyzer.CONFIG.dateStart = dateStart && /^\d{4}-\d{2}-\d{2}$/.test(dateStart) ? dateStart : null;
+      analyzer.CONFIG.dateEnd = dateEnd && /^\d{4}-\d{2}-\d{2}$/.test(dateEnd) ? dateEnd : null;
 
       sseHeaders(res);
 
@@ -556,6 +588,8 @@ async function handleRequest(req, res) {
       } finally {
         analysisRunning = false;
         analyzer.CONFIG.walkforward = false;  // Reset after run
+        analyzer.CONFIG.dateStart = null;     // Reset custom date range
+        analyzer.CONFIG.dateEnd = null;
       }
       return;
     }
@@ -594,6 +628,9 @@ async function handleRequest(req, res) {
 
     // --- API: Update settings (enhanced with testTimes + persistence) ---
     if (pathname === '/api/settings' && req.method === 'POST') {
+      if (analysisRunning) {
+        return json({ error: 'Cannot change settings while analysis is running' }, 409);
+      }
       const body = await parseBody(req);
       const guiUpdates = {};
 
@@ -601,9 +638,18 @@ async function handleRequest(req, res) {
         analyzer.CONFIG.ALPACA_TIMEFRAME = body.alpacaTimeframe;
         guiUpdates.alpacaTimeframe = body.alpacaTimeframe;
       }
-      if (body.eodTime && analyzer.CONFIG.EOD_TIME_OPTIONS.includes(body.eodTime)) {
+      // Validate EOD time against current timeframe: 15-min only allows 15:45/16:00
+      const effectiveTimeframe = body.alpacaTimeframe || analyzer.CONFIG.ALPACA_TIMEFRAME;
+      const validEodTimes = effectiveTimeframe === '5Min'
+        ? ['15:45', '15:50', '15:55', '16:00']
+        : ['15:45', '16:00'];
+      if (body.eodTime && validEodTimes.includes(body.eodTime)) {
         analyzer.CONFIG.EOD_TIME = body.eodTime;
         guiUpdates.eodTime = body.eodTime;
+      } else if (body.eodTime && !validEodTimes.includes(body.eodTime)) {
+        // Snap invalid EOD time to 15:45 (e.g., switching from 5min to 15min with 15:50 selected)
+        analyzer.CONFIG.EOD_TIME = '15:45';
+        guiUpdates.eodTime = '15:45';
       }
       if (body.testTimes && Array.isArray(body.testTimes) && body.testTimes.length > 0) {
         analyzer.CONFIG.TEST_TIMES = body.testTimes;
@@ -760,6 +806,21 @@ const FRONTEND_HTML = `<!DOCTYPE html>
     cursor: pointer; margin-bottom: 8px; user-select: none;
   }
   .wf-toggle input { accent-color: var(--accent); cursor: pointer; }
+  .date-range-row { margin-bottom: 8px; }
+  .date-range-toggle {
+    display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text2);
+    cursor: pointer; user-select: none;
+  }
+  .date-range-toggle input { accent-color: var(--accent); cursor: pointer; }
+  .date-range-inputs {
+    display: flex; align-items: center; gap: 6px; margin-top: 6px;
+  }
+  .date-input {
+    flex: 1; padding: 5px 6px; background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); border-radius: 4px; font-size: 11px; font-family: inherit;
+  }
+  .date-input::-webkit-calendar-picker-indicator { filter: invert(0.8); }
+  .date-sep { font-size: 11px; color: var(--text2); }
   .mode-select {
     width: 100%; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border);
     color: var(--text); border-radius: 6px; font-size: 13px; margin-bottom: 8px;
@@ -1009,6 +1070,16 @@ const FRONTEND_HTML = `<!DOCTYPE html>
       <label class="wf-toggle" title="Compute walk-forward consistency for the best time">
         <input type="checkbox" id="wfToggle" checked> Walk-Forward
       </label>
+      <div class="date-range-row">
+        <label class="date-range-toggle" title="Limit analysis to a specific date range">
+          <input type="checkbox" id="dateRangeToggle" onchange="toggleDateRange()"> Custom Date Range
+        </label>
+        <div class="date-range-inputs" id="dateRangeInputs" style="display:none">
+          <input type="date" id="dateStart" class="date-input" title="Start date">
+          <span class="date-sep">to</span>
+          <input type="date" id="dateEnd" class="date-input" title="End date">
+        </div>
+      </div>
       <button class="run-btn" id="runBtn" onclick="runAnalysis()" disabled>Run Analysis</button>
     </div>
   </div>
@@ -1101,6 +1172,7 @@ const FRONTEND_HTML = `<!DOCTYPE html>
     <div class="tab-content" id="tab-testtimes">
       <div class="times-header">
         <span class="times-count" id="timesCount">0 selected</span>
+        <button onclick="selectAllTestTimes()">Select All</button>
         <button onclick="resetTestTimes()">Reset to Defaults</button>
       </div>
       <div class="times-grid" id="timesGrid"></div>
@@ -1163,15 +1235,7 @@ function updateConfigUI() {
 
   // Settings modal - General tab
   document.getElementById('settingTimeframe').value = config.alpacaTimeframe || '15Min';
-  const eodSelect = document.getElementById('settingEod');
-  if (eodSelect.options.length === 0) {
-    ['15:45', '15:50', '15:55', '16:00'].forEach(function(t) {
-      var opt = document.createElement('option');
-      opt.value = t; opt.textContent = t;
-      eodSelect.appendChild(opt);
-    });
-  }
-  eodSelect.value = config.eodTime || '15:45';
+  buildEodOptions();
 
   // API Keys tab hints
   if (config.alpacaKeyHint) document.getElementById('hintAlpacaKey').textContent = 'Current: ' + config.alpacaKeyHint;
@@ -1333,6 +1397,19 @@ async function addById() {
 }
 
 // ============================================================================
+// DATE RANGE
+// ============================================================================
+
+function toggleDateRange() {
+  var on = document.getElementById('dateRangeToggle').checked;
+  document.getElementById('dateRangeInputs').style.display = on ? 'flex' : 'none';
+  if (!on) {
+    document.getElementById('dateStart').value = '';
+    document.getElementById('dateEnd').value = '';
+  }
+}
+
+// ============================================================================
 // ANALYSIS
 // ============================================================================
 
@@ -1358,10 +1435,17 @@ async function runAnalysis() {
 
   try {
     var wfEnabled = document.getElementById('wfToggle').checked;
+    var fetchBody = { ids: ids, mode: mode, walkforward: wfEnabled };
+    if (document.getElementById('dateRangeToggle').checked) {
+      var ds = document.getElementById('dateStart').value;
+      var de = document.getElementById('dateEnd').value;
+      if (ds) fetchBody.dateStart = ds;
+      if (de) fetchBody.dateEnd = de;
+    }
     var response = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: ids, mode: mode, walkforward: wfEnabled }),
+      body: JSON.stringify(fetchBody),
     });
 
     var reader = response.body.getReader();
@@ -1736,6 +1820,13 @@ function renderDetailCard(r, mode) {
     : 'Marginal difference - EOD-only is simpler';
   html += '<div class="recommendation ' + recClass + '">' + recText + '</div>';
 
+  // Composite score breakdown
+  if (r.compositeScores && r.bestTime && r.compositeScores[r.bestTime]) {
+    var cs = r.compositeScores[r.bestTime];
+    var wfPart = cs.wfScore !== null ? ' \\u00B7 WF ' + cs.wfScore : '';
+    html += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">Selection score: <strong>' + cs.total + '/100</strong> (Return ' + cs.returnScore + ', DD ' + cs.ddScore + ', Neighbors ' + cs.neighborScore + wfPart + ')</div>';
+  }
+
   // Walk-forward section
   if (r.walkforward) {
     var wfLabel = mode === 'dual' ? 'Dual' : '@' + r.bestTime;
@@ -1876,6 +1967,22 @@ function renderCombinedDetailCard(r) {
     : 'Marginal difference - EOD-only is simpler';
   html += '<div class="recommendation ' + recClass + '">' + recText + '</div>';
 
+  // Composite score breakdowns for each mode
+  var compParts = [];
+  if (r.dual && r.dual.compositeScores && r.dual.bestTime && r.dual.compositeScores[r.dual.bestTime]) {
+    var dcs = r.dual.compositeScores[r.dual.bestTime];
+    var dwf = dcs.wfScore !== null ? ' \\u00B7 WF ' + dcs.wfScore : '';
+    compParts.push('Dual @ ' + r.dual.bestTime + ': <strong>' + dcs.total + '/100</strong> (Ret ' + dcs.returnScore + ', DD ' + dcs.ddScore + ', Nbr ' + dcs.neighborScore + dwf + ')');
+  }
+  if (r.single && r.single.compositeScores && r.single.bestTime && r.single.compositeScores[r.single.bestTime]) {
+    var scs = r.single.compositeScores[r.single.bestTime];
+    var swf = scs.wfScore !== null ? ' \\u00B7 WF ' + scs.wfScore : '';
+    compParts.push('Single @ ' + r.single.bestTime + ': <strong>' + scs.total + '/100</strong> (Ret ' + scs.returnScore + ', DD ' + scs.ddScore + ', Nbr ' + scs.neighborScore + swf + ')');
+  }
+  if (compParts.length > 0) {
+    html += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">' + compParts.join(' &nbsp;|&nbsp; ') + '</div>';
+  }
+
   // Walk-forward sections
   if (r.dual && r.dual.walkforward) {
     html += renderWalkforwardHTML(r.dual.walkforward, 'Dual');
@@ -1930,8 +2037,37 @@ function closeSettings() {
 }
 
 function onTimeframeChange() {
-  // Regenerate test times grid when timeframe changes in settings
+  // Regenerate test times grid and EOD options when timeframe changes
+  buildEodOptions();
   buildTimesGrid();
+}
+
+function buildEodOptions() {
+  var timeframe = document.getElementById('settingTimeframe').value || config.alpacaTimeframe || '15Min';
+  var eodSelect = document.getElementById('settingEod');
+  var currentVal = eodSelect.value || config.eodTime || '15:45';
+
+  // 15-min mode: only 15:45 and 16:00 produce different prices
+  // 5-min mode: all four options are meaningful
+  var options = timeframe === '5Min'
+    ? ['15:45', '15:50', '15:55', '16:00']
+    : ['15:45', '16:00'];
+
+  eodSelect.innerHTML = '';
+  options.forEach(function(t) {
+    var opt = document.createElement('option');
+    opt.value = t;
+    opt.textContent = t === '16:00' ? '16:00 (Market Close)' : t;
+    eodSelect.appendChild(opt);
+  });
+
+  // Preserve current selection if still valid, otherwise snap to nearest
+  if (options.includes(currentVal)) {
+    eodSelect.value = currentVal;
+  } else {
+    // Snap 15:50 or 15:55 back to 15:45 when switching to 15-min mode
+    eodSelect.value = '15:45';
+  }
 }
 
 async function saveGeneralSettings() {
@@ -2064,6 +2200,12 @@ function updateTimesCount() {
   document.getElementById('timesCount').textContent = checked.length + ' selected';
 }
 
+function selectAllTestTimes() {
+  var checkboxes = document.querySelectorAll('#timesGrid input[type="checkbox"]');
+  checkboxes.forEach(function(cb) { cb.checked = true; });
+  updateTimesCount();
+}
+
 function resetTestTimes() {
   var checkboxes = document.querySelectorAll('#timesGrid input[type="checkbox"]');
   var defaults = new Set(DEFAULT_TEST_TIMES);
@@ -2190,7 +2332,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '127.0.0.1', () => {
   const guiSettings = loadGUISettings();
   console.log(`\n  Intraday Execution Analyzer - Web GUI`);
   console.log(`  ======================================`);
