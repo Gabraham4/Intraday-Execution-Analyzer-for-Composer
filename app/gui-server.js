@@ -725,7 +725,7 @@ const FRONTEND_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Intraday Execution Analyzer v2.1.1</title>
+<title>Intraday Execution Analyzer v2.1.2</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -1056,7 +1056,7 @@ const FRONTEND_HTML = `<!DOCTYPE html>
 <body>
 
 <div class="header">
-  <h1>Intraday Execution Analyzer <span>v2.1.1</span></h1>
+  <h1>Intraday Execution Analyzer <span>v2.1.2</span></h1>
   <div class="header-right">
     <span class="status-dot" id="alpacaDot"></span>
     <span class="status-label" id="alpacaLabel">Alpaca</span>
