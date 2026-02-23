@@ -1758,24 +1758,24 @@ function renderCombinedSummaryTable(results) {
     html += '<tr class="clickable" onclick="scrollToCard(\\'' + r.id + '\\')">';
     html += '<td title="' + escapeHtml(r.name) + '" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(r.name) + '</td>';
     html += '<td class="num" title="' + r.days + ' trading days">' + r.from + '</td>';
-    html += '<td class="num ' + valClass(r.eod) + '">' + fmtPct(r.eod, 0) + '</td>';
+    html += '<td class="num" style="color:#e6edf3">' + fmtPct(r.eod, 0) + '</td>';
     html += '<td class="num">' + r.dualTime + '</td>';
-    html += '<td class="num ' + valClass(r.dualRet) + '">' + fmtPct(r.dualRet, 0) + '</td>';
+    html += '<td class="num" style="color:#e6edf3">' + fmtPct(r.dualRet, 0) + '</td>';
     html += '<td class="num ' + valClass(r.dualRelImp) + '">' + fmtPct(r.dualRelImp, 0) + '</td>';
     if (r.dualScore > 0 && r.dualViable) {
       var dql = getQL(r.dualScore);
       html += '<td class="num" style="font-weight:700;color:' + dql.color + '">' + r.dualScore + '<br><span style="opacity:0.5;font-size:0.8em;font-weight:400">' + dql.label + '</span></td>';
     } else {
-      html += '<td class="num" style="color:#f85149;font-size:0.85em">N/R</td>';
+      html += '<td class="num" style="color:#f85149;font-size:0.8em">Not Recommended</td>';
     }
     html += '<td class="num">' + r.singleTime + '</td>';
-    html += '<td class="num ' + valClass(r.singleRet) + '">' + fmtPct(r.singleRet, 0) + '</td>';
+    html += '<td class="num" style="color:#e6edf3">' + fmtPct(r.singleRet, 0) + '</td>';
     html += '<td class="num ' + valClass(r.singleRelImp) + '">' + fmtPct(r.singleRelImp, 0) + '</td>';
     if (r.singleScore > 0 && r.singleViable) {
       var sql = getQL(r.singleScore);
       html += '<td class="num" style="font-weight:700;color:' + sql.color + '">' + r.singleScore + '<br><span style="opacity:0.5;font-size:0.8em;font-weight:400">' + sql.label + '</span></td>';
     } else {
-      html += '<td class="num" style="color:#f85149;font-size:0.85em">N/R</td>';
+      html += '<td class="num" style="color:#f85149;font-size:0.8em">Not Recommended</td>';
     }
     html += '</tr>';
   }
