@@ -3756,8 +3756,16 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
         times: timeResults,
         bestTime,
         bestImprovement,
-        recommendation: bestImprovement > 5 ? 'ADD_MORNING' :
-                       bestImprovement < -5 ? 'STICK_EOD' : 'MARGINAL',
+        recommendation: (() => {
+          const cs = selection.compositeScores && selection.compositeScores[bestTime];
+          const score = cs ? cs.total : 0;
+          const eodAbs = Math.abs(eodResult.cumReturn);
+          const relPct = eodAbs > 1 ? (bestImprovement / eodAbs) * 100 : bestImprovement * 10;
+          if (relPct < 10) return 'STICK_EOD'; // Relative improvement too small
+          if (score >= 60) return 'ADD_MORNING';
+          if (score < 40) return 'STICK_EOD';
+          return 'MARGINAL';
+        })(),
         walkforward,
         compositeScores: selection.compositeScores,
         selectionMethod: selection.selectionMethod
@@ -3860,7 +3868,14 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
         times: timeResults,
         bestTime,
         bestImprovement,
-        recommendation: bestTime !== CONFIG.EOD_TIME && bestImprovement > 5 ? 'USE_MORNING' : 'KEEP_EOD',
+        recommendation: (() => {
+          const cs = selection.compositeScores && selection.compositeScores[bestTime];
+          const score = cs ? cs.total : 0;
+          const eodAbs = Math.abs(eodResult.cumReturn);
+          const relPct = eodAbs > 1 ? (bestImprovement / eodAbs) * 100 : bestImprovement * 10;
+          if (bestTime !== CONFIG.EOD_TIME && relPct >= 10 && score >= 50) return 'USE_MORNING';
+          return 'KEEP_EOD';
+        })(),
         walkforward,
         compositeScores: selection.compositeScores,
         selectionMethod: selection.selectionMethod
@@ -3918,19 +3933,20 @@ function printDualTimeResults(results) {
 
     console.log('  └─────────┴─────────────────┴─────────────────┴─────────────────┘\n');
 
+    const dualCS = r.compositeScores && r.bestTime && r.compositeScores[r.bestTime];
+    const dualScoreStr = dualCS ? ` (score ${dualCS.total}/100)` : '';
     if (r.recommendation === 'ADD_MORNING') {
-      console.log(`  RECOMMENDATION: Consider adding "Run Now" at ${r.bestTime} (+${r.bestImprovement.toFixed(1)}% improvement)`);
+      console.log(`  RECOMMENDATION: Consider adding "Run Now" at ${r.bestTime}${dualScoreStr} (+${r.bestImprovement.toFixed(1)}% improvement)`);
     } else if (r.recommendation === 'STICK_EOD') {
       console.log(`  RECOMMENDATION: Stick with EOD-only - dual-time shows worse results`);
     } else {
-      console.log(`  RECOMMENDATION: Marginal difference - EOD-only is simpler`);
+      console.log(`  RECOMMENDATION: Marginal difference${dualScoreStr} - EOD-only is simpler`);
     }
 
     // Composite score breakdown
-    if (r.compositeScores && r.bestTime && r.compositeScores[r.bestTime]) {
-      const cs = r.compositeScores[r.bestTime];
-      const wfPart = cs.wfScore !== null ? `, WF ${cs.wfScore}` : '';
-      console.log(`  SELECTION: Composite score ${cs.total}/100 (Return ${cs.returnScore}, DD ${cs.ddScore}, Neighbors ${cs.neighborScore}${wfPart})`);
+    if (dualCS) {
+      const wfPart = dualCS.wfScore !== null ? `, WF ${dualCS.wfScore}` : '';
+      console.log(`  SELECTION: Composite ${dualCS.total}/100 (Return ${dualCS.returnScore}, DD ${dualCS.ddScore}, Neighbors ${dualCS.neighborScore}${wfPart})`);
     }
     console.log('');
 
@@ -4091,17 +4107,18 @@ function printSingleTimeResults(results) {
 
     console.log('  └─────────┴─────────────────┴─────────────────┴─────────────────┘\n');
 
+    const singleCS = r.compositeScores && r.bestTime && r.compositeScores[r.bestTime];
+    const singleScoreStr = singleCS ? ` (score ${singleCS.total}/100)` : '';
     if (r.recommendation === 'USE_MORNING') {
-      console.log(`  RECOMMENDATION: Consider switching to ${r.bestTime} (+${r.bestImprovement.toFixed(1)}% vs EOD)`);
+      console.log(`  RECOMMENDATION: Consider switching to ${r.bestTime}${singleScoreStr} (+${r.bestImprovement.toFixed(1)}% vs EOD)`);
     } else {
-      console.log(`  RECOMMENDATION: Keep default 3:45pm EOD execution`);
+      console.log(`  RECOMMENDATION: Keep default EOD execution`);
     }
 
     // Composite score breakdown
-    if (r.compositeScores && r.bestTime && r.compositeScores[r.bestTime]) {
-      const cs = r.compositeScores[r.bestTime];
-      const wfPart = cs.wfScore !== null ? `, WF ${cs.wfScore}` : '';
-      console.log(`  SELECTION: Composite score ${cs.total}/100 (Return ${cs.returnScore}, DD ${cs.ddScore}, Neighbors ${cs.neighborScore}${wfPart})`);
+    if (singleCS) {
+      const wfPart = singleCS.wfScore !== null ? `, WF ${singleCS.wfScore}` : '';
+      console.log(`  SELECTION: Composite ${singleCS.total}/100 (Return ${singleCS.returnScore}, DD ${singleCS.ddScore}, Neighbors ${singleCS.neighborScore}${wfPart})`);
     }
     console.log('');
 
@@ -4521,81 +4538,86 @@ function computeRobustnessTier(r, testTimes) {
 // ── End Robustness Tier Scoring ───────────────────────────────────────────
 
 function generateCombinedRecommendation(r) {
-  const dualBetter = r.dual.improvement > r.single.improvement;
-  const singleBetter = r.single.improvement > r.dual.improvement;
-  const dualHasHighDD = r.dual.bestDD > 30; // DD is positive, so > 30 means worse than 30%
-  const singleHasHighDD = r.single.bestDD > 30;
-  const eodHasHighDD = r.eod.maxDD > 30;
+  // Get composite scores for the selected best time in each mode
+  const dualScore = (r.dual.compositeScores && r.dual.bestTime && r.dual.compositeScores[r.dual.bestTime])
+    ? r.dual.compositeScores[r.dual.bestTime].total : 0;
+  const singleScore = (r.single.compositeScores && r.single.bestTime && r.single.compositeScores[r.single.bestTime])
+    ? r.single.compositeScores[r.single.bestTime].total : 0;
 
-  // Check if improvement comes with significantly worse drawdown
-  const dualDDWorse = r.dual.bestDD > r.eod.maxDD + 5; // DD got 5%+ worse (higher DD = worse)
+  const dualDDWorse = r.dual.bestDD > r.eod.maxDD + 5;
   const singleDDWorse = r.single.bestDD > r.eod.maxDD + 5;
+  const dualHasHighDD = r.dual.bestDD > 30;
+  const singleHasHighDD = r.single.bestDD > 30;
+
+  // Relative improvement: improvement as % of EOD return (handles negative/zero EOD)
+  const eodAbs = Math.abs(r.eod.cumReturn);
+  const dualRelPct = eodAbs > 1 ? (r.dual.improvement / eodAbs) * 100 : r.dual.improvement * 10;
+  const singleRelPct = eodAbs > 1 ? (r.single.improvement / eodAbs) * 100 : r.single.improvement * 10;
+  const REL_THRESHOLD = 10; // Need >= 10% relative improvement to recommend
 
   // Thresholds
-  const significantImprovement = 5; // 5%+ improvement is significant
-  const marginalThreshold = 2; // Less than 2% is marginal
+  const strongScore = 60;
+  const marginalScore = 40;
 
   let text = '';
   let warning = null;
 
-  // Neither mode helps much
-  if (r.dual.improvement < marginalThreshold && r.single.improvement < marginalThreshold) {
-    text = `STICK WITH EOD-ONLY - Neither mode shows significant improvement`;
+  // Comparison line always included: shows both modes so user sees the gap
+  const dualLabel = `Dual @${r.dual.bestTime}: ${dualScore}/100, +${r.dual.improvement.toFixed(1)}% (${dualRelPct >= 0 ? '+' : ''}${dualRelPct.toFixed(0)}% rel)`;
+  const singleLabel = `Single @${r.single.bestTime}: ${singleScore}/100, +${r.single.improvement.toFixed(1)}% (${singleRelPct >= 0 ? '+' : ''}${singleRelPct.toFixed(0)}% rel)`;
+  const comparison = `${dualLabel}  vs  ${singleLabel}`;
+
+  // Neither mode passes relative improvement threshold
+  if (dualRelPct < REL_THRESHOLD && singleRelPct < REL_THRESHOLD) {
+    text = `NOT RECOMMENDED - Improvement too small relative to EOD returns. ${comparison}`;
     return { text, warning };
   }
 
-  // Dual is clearly better
-  if (dualBetter && r.dual.improvement >= significantImprovement) {
-    text = `USE DUAL MODE @ ${r.dual.bestTime} (+${r.dual.improvement.toFixed(1)}% improvement)`;
-    if (dualDDWorse) {
-      warning = `Drawdown increases from ${r.eod.maxDD.toFixed(1)}% to ${r.dual.bestDD.toFixed(1)}%`;
+  // Determine viability: must pass relative threshold
+  const dualViable = dualRelPct >= REL_THRESHOLD;
+  const singleViable = singleRelPct >= REL_THRESHOLD;
+
+  // Pick the mode with higher composite score (if viable)
+  let preferDual = false;
+  let preferSingle = false;
+
+  if (dualViable && singleViable) {
+    if (dualScore > singleScore + 5) preferDual = true;
+    else if (singleScore > dualScore + 5) preferSingle = true;
+    else {
+      if (r.single.bestDD < r.dual.bestDD - 2) preferSingle = true;
+      else if (r.dual.bestDD < r.single.bestDD - 2) preferDual = true;
+      else preferSingle = true;
     }
-    if (dualHasHighDD) {
-      warning = (warning ? warning + ' | ' : '') + `High drawdown risk (${r.dual.bestDD.toFixed(1)}%)`;
-    }
-    return { text, warning };
+  } else if (dualViable) {
+    preferDual = true;
+  } else if (singleViable) {
+    preferSingle = true;
   }
 
-  // Single is clearly better
-  if (singleBetter && r.single.improvement >= significantImprovement) {
-    text = `USE SINGLE MODE @ ${r.single.bestTime} (+${r.single.improvement.toFixed(1)}% improvement)`;
-    if (singleDDWorse) {
-      warning = `Drawdown increases from ${r.eod.maxDD.toFixed(1)}% to ${r.single.bestDD.toFixed(1)}%`;
-    }
-    if (singleHasHighDD) {
-      warning = (warning ? warning + ' | ' : '') + `High drawdown risk (${r.single.bestDD.toFixed(1)}%)`;
-    }
-    return { text, warning };
-  }
-
-  // Both show improvement but neither is clearly better
-  if (r.dual.improvement >= marginalThreshold && r.single.improvement >= marginalThreshold) {
-    // Prefer the one with better risk-adjusted profile (higher return with similar/better DD)
-    const dualRiskAdj = r.dual.improvement / Math.abs(r.dual.bestDD);
-    const singleRiskAdj = r.single.improvement / Math.abs(r.single.bestDD);
-
-    if (dualRiskAdj > singleRiskAdj * 1.1) { // Dual is 10%+ better risk-adjusted
-      text = `PREFER DUAL @ ${r.dual.bestTime} (better risk-adjusted return)`;
-    } else if (singleRiskAdj > dualRiskAdj * 1.1) {
-      text = `PREFER SINGLE @ ${r.single.bestTime} (better risk-adjusted return)`;
+  // Generate recommendation text — always show both scores
+  if (preferDual) {
+    if (dualScore >= strongScore) {
+      text = `USE DUAL MODE @ ${r.dual.bestTime}. ${comparison}`;
+    } else if (dualScore >= marginalScore) {
+      text = `PREFER DUAL @ ${r.dual.bestTime}. ${comparison}`;
     } else {
-      // They're similar - prefer the simpler option (single) or lower DD
-      if (r.single.bestDD < r.dual.bestDD) { // Lower DD value = better
-        text = `PREFER SINGLE @ ${r.single.bestTime} (lower drawdown: ${r.single.bestDD.toFixed(1)}% vs ${r.dual.bestDD.toFixed(1)}%)`;
-      } else {
-        text = `PREFER DUAL @ ${r.dual.bestTime} (higher return: +${r.dual.improvement.toFixed(1)}% vs +${r.single.improvement.toFixed(1)}%)`;
-      }
+      text = `MARGINAL: DUAL @ ${r.dual.bestTime}. ${comparison}`;
     }
-    return { text, warning };
-  }
-
-  // One shows marginal improvement
-  if (r.dual.improvement >= marginalThreshold) {
-    text = `MARGINAL: DUAL @ ${r.dual.bestTime} shows modest improvement (+${r.dual.improvement.toFixed(1)}%)`;
-  } else if (r.single.improvement >= marginalThreshold) {
-    text = `MARGINAL: SINGLE @ ${r.single.bestTime} shows modest improvement (+${r.single.improvement.toFixed(1)}%)`;
+    if (dualDDWorse) warning = `Drawdown increases from ${r.eod.maxDD.toFixed(1)}% to ${r.dual.bestDD.toFixed(1)}%`;
+    if (dualHasHighDD) warning = (warning ? warning + ' | ' : '') + `High drawdown risk (${r.dual.bestDD.toFixed(1)}%)`;
+  } else if (preferSingle) {
+    if (singleScore >= strongScore) {
+      text = `USE SINGLE MODE @ ${r.single.bestTime}. ${comparison}`;
+    } else if (singleScore >= marginalScore) {
+      text = `PREFER SINGLE @ ${r.single.bestTime}. ${comparison}`;
+    } else {
+      text = `MARGINAL: SINGLE @ ${r.single.bestTime}. ${comparison}`;
+    }
+    if (singleDDWorse) warning = `Drawdown increases from ${r.eod.maxDD.toFixed(1)}% to ${r.single.bestDD.toFixed(1)}%`;
+    if (singleHasHighDD) warning = (warning ? warning + ' | ' : '') + `High drawdown risk (${r.single.bestDD.toFixed(1)}%)`;
   } else {
-    text = `STICK WITH EOD-ONLY - No significant improvement from either mode`;
+    text = `NOT RECOMMENDED - No mode passes thresholds. ${comparison}`;
   }
 
   return { text, warning };

@@ -222,10 +222,12 @@ function buildReportHTML(r, mode) {
     body += '</div>';
 
     // Recommendation
+    var stCS = (r.compositeScores && r.bestTime) ? r.compositeScores[r.bestTime] : null;
+    var stScr = stCS ? ' (score ' + stCS.total + '/100)' : '';
     var recClass = r.recommendation === 'ADD_MORNING' || r.recommendation === 'USE_MORNING' ? 'rec-add'
       : r.recommendation === 'STICK_EOD' ? 'rec-warn' : 'rec-keep';
-    var recText = r.recommendation === 'ADD_MORNING' ? 'Consider adding intraday trade at ' + r.bestTime + ' (' + pct(r.bestImprovement, 1) + ' improvement)'
-      : r.recommendation === 'USE_MORNING' ? 'Consider switching to ' + r.bestTime + ' (' + pct(r.bestImprovement, 1) + ' vs EOD)'
+    var recText = r.recommendation === 'ADD_MORNING' ? 'Consider adding intraday trade at ' + r.bestTime + stScr + ' (' + pct(r.bestImprovement, 1) + ' improvement)'
+      : r.recommendation === 'USE_MORNING' ? 'Consider switching to ' + r.bestTime + stScr + ' (' + pct(r.bestImprovement, 1) + ' vs EOD)'
       : r.recommendation === 'STICK_EOD' ? 'Stick with EOD-only \u2014 ' + mode + '-time shows worse results'
       : r.recommendation === 'KEEP_EOD' ? 'Keep default EOD execution'
       : 'Marginal difference \u2014 EOD-only is simpler';
@@ -337,14 +339,32 @@ function buildReportHTML(r, mode) {
       body += '</div>';
     }
 
-    // Combined recommendation
-    var dualBetter = r.dual.improvement >= r.single.improvement;
-    var bestMode = dualBetter ? 'Dual' : 'Single';
-    var bestImp = dualBetter ? r.dual.improvement : r.single.improvement;
-    var cRecClass = bestImp > 5 ? 'rec-add' : bestImp < -5 ? 'rec-warn' : 'rec-keep';
-    var cRecText = bestImp > 5 ? bestMode + ' mode shows ' + pct(bestImp, 1) + ' improvement'
-      : bestImp < -5 ? 'Both modes show worse results \u2014 keep EOD'
-      : 'Marginal difference \u2014 EOD-only is simpler';
+    // Combined recommendation — use composite scores + relative improvement
+    var dualCS = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
+    var singleCS = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
+    var dualTotal = dualCS ? dualCS.total : 0;
+    var singleTotal = singleCS ? singleCS.total : 0;
+    var eodAbs = Math.abs(r.eod.cumReturn);
+    var dualRelPct = eodAbs > 1 ? (r.dual.improvement / eodAbs) * 100 : r.dual.improvement * 10;
+    var singleRelPct = eodAbs > 1 ? (r.single.improvement / eodAbs) * 100 : r.single.improvement * 10;
+    var dualViable = dualRelPct >= 10;
+    var singleViable = singleRelPct >= 10;
+    var bestMode, bestScore, bestImp, bestRel;
+    if (dualViable && singleViable) {
+      if (dualTotal >= singleTotal) { bestMode = 'Dual'; bestScore = dualTotal; bestImp = r.dual.improvement; bestRel = dualRelPct; }
+      else { bestMode = 'Single'; bestScore = singleTotal; bestImp = r.single.improvement; bestRel = singleRelPct; }
+    } else if (dualViable) { bestMode = 'Dual'; bestScore = dualTotal; bestImp = r.dual.improvement; bestRel = dualRelPct; }
+    else if (singleViable) { bestMode = 'Single'; bestScore = singleTotal; bestImp = r.single.improvement; bestRel = singleRelPct; }
+    else { bestMode = null; bestScore = 0; bestImp = 0; bestRel = 0; }
+    var cRecClass = bestMode && bestScore >= 60 ? 'rec-add' : !bestMode ? 'rec-warn' : 'rec-keep';
+    var cRecText;
+    if (!bestMode) {
+      cRecText = 'NOT RECOMMENDED \u2014 Improvement too small relative to EOD returns';
+    } else if (bestScore >= 60) {
+      cRecText = 'USE ' + bestMode.toUpperCase() + ' @ ' + (bestMode === 'Dual' ? r.dual.bestTime : r.single.bestTime) + ' (score ' + bestScore + '/100, ' + pct(bestImp, 1) + ', ' + (bestRel >= 0 ? '+' : '') + bestRel.toFixed(0) + '% relative)';
+    } else {
+      cRecText = bestMode + ' mode marginal (score ' + bestScore + '/100, ' + pct(bestImp, 1) + ', ' + (bestRel >= 0 ? '+' : '') + bestRel.toFixed(0) + '% relative)';
+    }
     body += '<div class="' + cRecClass + '">' + cRecText + '</div>';
 
     // Composite score breakdowns
@@ -554,17 +574,19 @@ async function handleRequest(req, res) {
         sseSend(res, 'start', { total: ids.length, mode });
 
         if (mode === 'combined') {
-          // Combined runs both dual and single internally, so we run it as a batch
-          sseSend(res, 'progress', { current: 1, total: ids.length, phase: 'combined' });
-          const results = await analyzer.combinedAnalysis(ids, intradayDays, true);
-          for (const r of results) {
+          // Run combined one strategy at a time for streaming progress
+          for (let i = 0; i < ids.length; i++) {
             if (closed.value) break;
-            // Attach robustness tier for client-side rendering
-            if (!r.error && analyzer.computeRobustnessTier) {
+            sseSend(res, 'progress', { current: i + 1, total: ids.length, id: ids[i], phase: 'combined' });
+            const results = await analyzer.combinedAnalysis([ids[i]], intradayDays, true);
+            const r = results[0];
+            if (r && !r.error && analyzer.computeRobustnessTier) {
               r.tier = analyzer.computeRobustnessTier(r, analyzer.CONFIG.TEST_TIMES);
             }
-            sseSend(res, 'result', r);
-            saveReport(r, 'combined');
+            if (r) {
+              sseSend(res, 'result', r);
+              saveReport(r, 'combined');
+            }
           }
         } else {
           // For dual/single, analyze one at a time for streaming progress
@@ -1814,11 +1836,13 @@ function renderDetailCard(r, mode) {
   html += '</tbody></table>';
 
   // Recommendation
+  var dcCS = (r.compositeScores && r.bestTime) ? r.compositeScores[r.bestTime] : null;
+  var dcScr = dcCS ? ' (score ' + dcCS.total + '/100)' : '';
   var recClass = r.recommendation === 'ADD_MORNING' || r.recommendation === 'USE_MORNING' ? 'add'
     : r.recommendation === 'STICK_EOD' ? 'warning' : 'keep';
-  var recText = r.recommendation === 'ADD_MORNING' ? 'Consider adding morning trade at ' + r.bestTime + ' (+' + r.bestImprovement.toFixed(1) + '% improvement)'
-    : r.recommendation === 'USE_MORNING' ? 'Consider switching to ' + r.bestTime + ' (+' + r.bestImprovement.toFixed(1) + '% vs EOD)'
-    : r.recommendation === 'STICK_EOD' ? 'Stick with EOD-only - dual-time shows worse results'
+  var recText = r.recommendation === 'ADD_MORNING' ? 'Consider adding morning trade at ' + r.bestTime + dcScr + ' (+' + r.bestImprovement.toFixed(1) + '% improvement)'
+    : r.recommendation === 'USE_MORNING' ? 'Consider switching to ' + r.bestTime + dcScr + ' (+' + r.bestImprovement.toFixed(1) + '% vs EOD)'
+    : r.recommendation === 'STICK_EOD' ? 'Stick with EOD-only - shows worse results'
     : r.recommendation === 'KEEP_EOD' ? 'Keep default EOD execution'
     : 'Marginal difference - EOD-only is simpler';
   html += '<div class="recommendation ' + recClass + '">' + recText + '</div>';
@@ -1960,14 +1984,32 @@ function renderCombinedDetailCard(r) {
     html += '</tbody></table>';
   }
 
-  // Best overall
-  var dualBetter = r.dual.improvement >= r.single.improvement;
-  var bestMode = dualBetter ? 'Dual' : 'Single';
-  var bestImp = dualBetter ? r.dual.improvement : r.single.improvement;
-  var recClass = bestImp > 5 ? 'add' : bestImp < -5 ? 'warning' : 'keep';
-  var recText = bestImp > 5 ? bestMode + ' mode shows ' + fmtPct(bestImp, 1) + ' improvement'
-    : bestImp < -5 ? 'Both modes show worse results - keep EOD'
-    : 'Marginal difference - EOD-only is simpler';
+  // Best overall — use composite scores + relative improvement
+  var dualCS2 = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
+  var singleCS2 = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
+  var dt2 = dualCS2 ? dualCS2.total : 0;
+  var st2 = singleCS2 ? singleCS2.total : 0;
+  var eodAbs2 = Math.abs(r.eod.cumReturn);
+  var dRelPct = eodAbs2 > 1 ? (r.dual.improvement / eodAbs2) * 100 : r.dual.improvement * 10;
+  var sRelPct = eodAbs2 > 1 ? (r.single.improvement / eodAbs2) * 100 : r.single.improvement * 10;
+  var dv2 = dRelPct >= 10;
+  var sv2 = sRelPct >= 10;
+  var bm2, bs2, bi2, br2;
+  if (dv2 && sv2) {
+    if (dt2 >= st2) { bm2 = 'Dual'; bs2 = dt2; bi2 = r.dual.improvement; br2 = dRelPct; }
+    else { bm2 = 'Single'; bs2 = st2; bi2 = r.single.improvement; br2 = sRelPct; }
+  } else if (dv2) { bm2 = 'Dual'; bs2 = dt2; bi2 = r.dual.improvement; br2 = dRelPct; }
+  else if (sv2) { bm2 = 'Single'; bs2 = st2; bi2 = r.single.improvement; br2 = sRelPct; }
+  else { bm2 = null; bs2 = 0; bi2 = 0; br2 = 0; }
+  var recClass = bm2 && bs2 >= 60 ? 'add' : !bm2 ? 'warning' : 'keep';
+  var recText;
+  if (!bm2) {
+    recText = 'NOT RECOMMENDED - Improvement too small relative to EOD returns';
+  } else if (bs2 >= 60) {
+    recText = 'USE ' + bm2.toUpperCase() + ' @ ' + (bm2 === 'Dual' ? r.dual.bestTime : r.single.bestTime) + ' (score ' + bs2 + '/100, ' + fmtPct(bi2, 1) + ', +' + br2.toFixed(0) + '% relative)';
+  } else {
+    recText = bm2 + ' mode marginal (score ' + bs2 + '/100, ' + fmtPct(bi2, 1) + ', +' + br2.toFixed(0) + '% relative)';
+  }
   html += '<div class="recommendation ' + recClass + '">' + recText + '</div>';
 
   // Composite score breakdowns for each mode
