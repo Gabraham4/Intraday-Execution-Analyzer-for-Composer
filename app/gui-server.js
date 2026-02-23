@@ -328,12 +328,7 @@ function buildReportHTML(r, mode) {
     // Determine recommendation first (needed to decide layout)
     var dualCS = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
     var singleCS = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
-    var getQL = analyzer.getCompositeQuality || function(s) {
-      if (s >= 75) return { label: 'STRONG', htmlColor: '#3fb950', bgColor: 'rgba(63,185,80,0.12)', borderColor: 'rgba(63,185,80,0.3)' };
-      if (s >= 55) return { label: 'GOOD', htmlColor: '#58a6ff', bgColor: 'rgba(88,166,255,0.12)', borderColor: 'rgba(88,166,255,0.3)' };
-      if (s >= 40) return { label: 'MARGINAL', htmlColor: '#d29922', bgColor: 'rgba(210,153,34,0.12)', borderColor: 'rgba(210,153,34,0.3)' };
-      return { label: 'WEAK', htmlColor: '#f85149', bgColor: 'rgba(248,81,73,0.12)', borderColor: 'rgba(248,81,73,0.3)' };
-    };
+    var getQL = analyzer.getCompositeQuality;
     var dualTotal = dualCS ? dualCS.total : 0;
     var singleTotal = singleCS ? singleCS.total : 0;
     var eodAbs = Math.abs(r.eod.cumReturn);
@@ -1714,12 +1709,7 @@ function renderCombinedSummaryTable(results) {
     { key: 'singleScore', label: 'Single Score', cls: 'num' },
   ];
 
-  var getQL = function(s) {
-    if (s >= 75) return { label: 'STRONG', color: '#3fb950' };
-    if (s >= 55) return { label: 'GOOD', color: '#58a6ff' };
-    if (s >= 40) return { label: 'MARGINAL', color: '#d29922' };
-    return { label: 'WEAK', color: '#f85149' };
-  };
+  var getQL = analyzer.getCompositeQuality;
 
   var rows = results.map(function(r) {
     var eod = r.eod.cumReturn;
@@ -1764,7 +1754,7 @@ function renderCombinedSummaryTable(results) {
     html += '<td class="num ' + valClass(r.dualRelImp) + '">' + fmtPct(r.dualRelImp, 0) + '</td>';
     if (r.dualScore > 0 && r.dualViable) {
       var dql = getQL(r.dualScore);
-      html += '<td class="num" style="font-weight:700;color:' + dql.color + '">' + r.dualScore + '<br><span style="opacity:0.5;font-size:0.8em;font-weight:400">' + dql.label + '</span></td>';
+      html += '<td class="num" style="font-weight:700;color:' + dql.htmlColor + '">' + r.dualScore + '<br><span style="opacity:0.5;font-size:0.8em;font-weight:400">' + dql.label + '</span></td>';
     } else {
       html += '<td class="num" style="color:#f85149;font-size:0.8em">Not Recommended</td>';
     }
@@ -1773,7 +1763,7 @@ function renderCombinedSummaryTable(results) {
     html += '<td class="num ' + valClass(r.singleRelImp) + '">' + fmtPct(r.singleRelImp, 0) + '</td>';
     if (r.singleScore > 0 && r.singleViable) {
       var sql = getQL(r.singleScore);
-      html += '<td class="num" style="font-weight:700;color:' + sql.color + '">' + r.singleScore + '<br><span style="opacity:0.5;font-size:0.8em;font-weight:400">' + sql.label + '</span></td>';
+      html += '<td class="num" style="font-weight:700;color:' + sql.htmlColor + '">' + r.singleScore + '<br><span style="opacity:0.5;font-size:0.8em;font-weight:400">' + sql.label + '</span></td>';
     } else {
       html += '<td class="num" style="color:#f85149;font-size:0.8em">Not Recommended</td>';
     }
@@ -1914,12 +1904,7 @@ function renderCombinedDetailCard(r) {
   // Determine recommendation first
   var dcsData = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
   var scsData = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
-  var getQL2 = function(s) {
-    if (s >= 75) return { label: 'STRONG', htmlColor: '#3fb950', bgColor: 'rgba(63,185,80,0.12)', borderColor: 'rgba(63,185,80,0.3)' };
-    if (s >= 55) return { label: 'GOOD', htmlColor: '#58a6ff', bgColor: 'rgba(88,166,255,0.12)', borderColor: 'rgba(88,166,255,0.3)' };
-    if (s >= 40) return { label: 'MARGINAL', htmlColor: '#d29922', bgColor: 'rgba(210,153,34,0.12)', borderColor: 'rgba(210,153,34,0.3)' };
-    return { label: 'WEAK', htmlColor: '#f85149', bgColor: 'rgba(248,81,73,0.12)', borderColor: 'rgba(248,81,73,0.3)' };
-  };
+  var getQL2 = analyzer.getCompositeQuality;
   var eodAbs2 = Math.abs(r.eod.cumReturn);
   var dRelPct = eodAbs2 > 1 ? (r.dual.improvement / eodAbs2) * 100 : r.dual.improvement * 10;
   var sRelPct = eodAbs2 > 1 ? (r.single.improvement / eodAbs2) * 100 : r.single.improvement * 10;

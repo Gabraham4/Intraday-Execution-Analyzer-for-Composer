@@ -4589,7 +4589,7 @@ function printCombinedSummaryTable(results) {
   console.log('    • Dual = Morning trade + EOD trade | Single = Replace EOD with different time');
   console.log('    • Imp = Improvement vs EOD-only baseline');
   console.log('    • Best = Recommended mode (EOD/DUAL/SINGLE)');
-  console.log('    • Tier = Robustness tier: T1=Robust, T2=Promising, T3=Speculative, T4=Avoid (score/9)');
+  console.log('    • Score = Composite quality score: STRONG (75+), GOOD (55-74), MARGINAL (40-54), WEAK (<40)');
   console.log('    • ⚠️ = High drawdown warning (DD > 30% or DD increased significantly)');
   console.log('');
 }
