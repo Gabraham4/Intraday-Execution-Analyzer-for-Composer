@@ -385,10 +385,10 @@ function buildReportHTML(r, mode) {
 
     // Walk-forward for combined
     if (r.dual && r.dual.walkforward) {
-      body += buildWalkforwardSection(r.dual.walkforward, 'Dual');
+      body += buildWalkforwardSection(r.dual.walkforward, 'Dual @' + r.dual.bestTime);
     }
     if (r.single && r.single.walkforward) {
-      body += buildWalkforwardSection(r.single.walkforward, '@' + r.single.bestTime);
+      body += buildWalkforwardSection(r.single.walkforward, 'Single @' + r.single.bestTime);
     }
   }
 
@@ -1751,12 +1751,13 @@ function renderCombinedSummaryTable(results) {
   return html;
 }
 
-function renderWalkforwardHTML(wf, altLabel) {
+function renderWalkforwardHTML(wf, altLabel, sectionLabel) {
   if (!wf || !wf.summary || wf.summary.verdict === 'INSUFFICIENT_DATA') return '';
   var s = wf.summary;
+  var heading = sectionLabel ? sectionLabel + ' Walk-Forward Consistency' : 'Walk-Forward Consistency';
 
   var html = '<div style="margin-top:16px">';
-  html += '<div style="font-size:12px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Walk-Forward Consistency (' + s.total + ' windows)</div>';
+  html += '<div style="font-size:12px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">' + heading + ' (' + s.total + ' windows)</div>';
 
   // Windows table
   html += '<table class="detail-table"><thead><tr>';
@@ -1774,19 +1775,15 @@ function renderWalkforwardHTML(wf, altLabel) {
   }
   html += '</tbody></table>';
 
-  // Verdict
-  var vClass = s.verdict === 'CONSISTENT' ? 'add' : s.verdict === 'EPISODIC' ? 'keep' : 'warning';
-  var vDesc = s.verdict === 'CONSISTENT' ? 'Alpha is persistent and reliable'
-    : s.verdict === 'EPISODIC' ? 'Alpha is real but regime-dependent'
-    : 'Alpha concentrated in few windows \\u2014 likely curve-fitted';
-  html += '<div class="recommendation ' + vClass + '" style="margin-top:8px">';
-  html += '<strong>' + s.verdict + '</strong> \\u2014 ';
+  // Summary line — just stats, no recommendation styling
+  var vColor = s.verdict === 'CONSISTENT' ? '#3fb950' : s.verdict === 'EPISODIC' ? '#d29922' : '#f85149';
+  html += '<div style="margin-top:8px;font-size:12px;color:var(--text2,#8b949e)">';
+  html += '<span style="color:' + vColor + ';font-weight:600">' + s.verdict + '</span> \\u2014 ';
   html += s.wins + '/' + s.total + ' windows (' + (s.winRate * 100).toFixed(1) + '%)';
   html += ' | Avg alpha: ' + fmtPct(s.avgAlpha, 2);
   if (s.total >= 3) {
     html += ' | Recent: ' + s.recentWins + '/' + Math.min(3, s.total) + ' wins';
   }
-  html += '<div style="margin-top:4px;font-size:12px;opacity:0.8">' + vDesc + '</div>';
   html += '</div></div>';
 
   return html;
@@ -1908,6 +1905,62 @@ function renderCombinedDetailCard(r) {
     html += '</div></div>';
   }
 
+  // Composite score breakdowns — two side-by-side boxes
+  var dcsData = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
+  var scsData = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
+  if (dcsData || scsData) {
+    html += '<div style="display:flex;gap:8px;margin-bottom:10px">';
+    if (dcsData) {
+      var dBorder = dcsData.total >= 60 ? 'rgba(63,185,80,0.3)' : dcsData.total >= 40 ? 'rgba(88,166,255,0.3)' : 'rgba(210,153,34,0.3)';
+      var dColor = dcsData.total >= 60 ? '#3fb950' : dcsData.total >= 40 ? '#58a6ff' : '#d29922';
+      html += '<div style="flex:1;padding:8px 10px;border-radius:5px;background:rgba(136,136,136,0.08);border:1px solid ' + dBorder + ';font-size:12px;line-height:1.6">';
+      html += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Dual @ ' + r.dual.bestTime + '</div>';
+      html += '<span style="font-size:18px;font-weight:700;color:' + dColor + '">' + dcsData.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
+      html += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
+      html += 'Return ' + dcsData.returnScore + ' \\u00B7 DD ' + dcsData.ddScore + ' \\u00B7 Neighbors ' + dcsData.neighborScore;
+      if (dcsData.wfScore !== null) html += ' \\u00B7 WF ' + dcsData.wfScore;
+      html += '</div></div>';
+    }
+    if (scsData) {
+      var sBorder = scsData.total >= 60 ? 'rgba(63,185,80,0.3)' : scsData.total >= 40 ? 'rgba(88,166,255,0.3)' : 'rgba(210,153,34,0.3)';
+      var sColor = scsData.total >= 60 ? '#3fb950' : scsData.total >= 40 ? '#58a6ff' : '#d29922';
+      html += '<div style="flex:1;padding:8px 10px;border-radius:5px;background:rgba(136,136,136,0.08);border:1px solid ' + sBorder + ';font-size:12px;line-height:1.6">';
+      html += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Single @ ' + r.single.bestTime + '</div>';
+      html += '<span style="font-size:18px;font-weight:700;color:' + sColor + '">' + scsData.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
+      html += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
+      html += 'Return ' + scsData.returnScore + ' \\u00B7 DD ' + scsData.ddScore + ' \\u00B7 Neighbors ' + scsData.neighborScore;
+      if (scsData.wfScore !== null) html += ' \\u00B7 WF ' + scsData.wfScore;
+      html += '</div></div>';
+    }
+    html += '</div>';
+  }
+
+  // Recommendation — up top for immediate visibility
+  var eodAbs2 = Math.abs(r.eod.cumReturn);
+  var dRelPct = eodAbs2 > 1 ? (r.dual.improvement / eodAbs2) * 100 : r.dual.improvement * 10;
+  var sRelPct = eodAbs2 > 1 ? (r.single.improvement / eodAbs2) * 100 : r.single.improvement * 10;
+  var dv2 = dRelPct >= 10;
+  var sv2 = sRelPct >= 10;
+  var dualCS2 = dcsData ? dcsData.total : 0;
+  var singleCS2 = scsData ? scsData.total : 0;
+  var bm2, bs2, bi2, br2;
+  if (dv2 && sv2) {
+    if (dualCS2 >= singleCS2) { bm2 = 'Dual'; bs2 = dualCS2; bi2 = r.dual.improvement; br2 = dRelPct; }
+    else { bm2 = 'Single'; bs2 = singleCS2; bi2 = r.single.improvement; br2 = sRelPct; }
+  } else if (dv2) { bm2 = 'Dual'; bs2 = dualCS2; bi2 = r.dual.improvement; br2 = dRelPct; }
+  else if (sv2) { bm2 = 'Single'; bs2 = singleCS2; bi2 = r.single.improvement; br2 = sRelPct; }
+  else { bm2 = null; bs2 = 0; bi2 = 0; br2 = 0; }
+  var recClass = bm2 && bs2 >= 60 ? 'add' : !bm2 ? 'warning' : 'keep';
+  var recText;
+  if (!bm2) {
+    recText = 'NOT RECOMMENDED - Improvement too small relative to EOD returns';
+  } else if (bs2 >= 60) {
+    recText = 'USE ' + bm2.toUpperCase() + ' @ ' + (bm2 === 'Dual' ? r.dual.bestTime : r.single.bestTime) + ' (score ' + bs2 + '/100, ' + fmtPct(bi2, 1) + ', +' + br2.toFixed(0) + '% relative)';
+  } else {
+    recText = bm2 + ' mode marginal (score ' + bs2 + '/100, ' + fmtPct(bi2, 1) + ', +' + br2.toFixed(0) + '% relative)';
+  }
+  html += '<div class="recommendation ' + recClass + '">' + recText + '</div>';
+
   // Summary: best of each mode
   html += '<table class="detail-table"><thead><tr>';
   html += '<th>Mode</th><th>Best Time</th><th>Return</th><th>vs EOD</th><th>% of EOD</th><th>Max DD</th><th>DD vs EOD</th>';
@@ -1984,56 +2037,12 @@ function renderCombinedDetailCard(r) {
     html += '</tbody></table>';
   }
 
-  // Best overall — use composite scores + relative improvement
-  var dualCS2 = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
-  var singleCS2 = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
-  var dt2 = dualCS2 ? dualCS2.total : 0;
-  var st2 = singleCS2 ? singleCS2.total : 0;
-  var eodAbs2 = Math.abs(r.eod.cumReturn);
-  var dRelPct = eodAbs2 > 1 ? (r.dual.improvement / eodAbs2) * 100 : r.dual.improvement * 10;
-  var sRelPct = eodAbs2 > 1 ? (r.single.improvement / eodAbs2) * 100 : r.single.improvement * 10;
-  var dv2 = dRelPct >= 10;
-  var sv2 = sRelPct >= 10;
-  var bm2, bs2, bi2, br2;
-  if (dv2 && sv2) {
-    if (dt2 >= st2) { bm2 = 'Dual'; bs2 = dt2; bi2 = r.dual.improvement; br2 = dRelPct; }
-    else { bm2 = 'Single'; bs2 = st2; bi2 = r.single.improvement; br2 = sRelPct; }
-  } else if (dv2) { bm2 = 'Dual'; bs2 = dt2; bi2 = r.dual.improvement; br2 = dRelPct; }
-  else if (sv2) { bm2 = 'Single'; bs2 = st2; bi2 = r.single.improvement; br2 = sRelPct; }
-  else { bm2 = null; bs2 = 0; bi2 = 0; br2 = 0; }
-  var recClass = bm2 && bs2 >= 60 ? 'add' : !bm2 ? 'warning' : 'keep';
-  var recText;
-  if (!bm2) {
-    recText = 'NOT RECOMMENDED - Improvement too small relative to EOD returns';
-  } else if (bs2 >= 60) {
-    recText = 'USE ' + bm2.toUpperCase() + ' @ ' + (bm2 === 'Dual' ? r.dual.bestTime : r.single.bestTime) + ' (score ' + bs2 + '/100, ' + fmtPct(bi2, 1) + ', +' + br2.toFixed(0) + '% relative)';
-  } else {
-    recText = bm2 + ' mode marginal (score ' + bs2 + '/100, ' + fmtPct(bi2, 1) + ', +' + br2.toFixed(0) + '% relative)';
-  }
-  html += '<div class="recommendation ' + recClass + '">' + recText + '</div>';
-
-  // Composite score breakdowns for each mode
-  var compParts = [];
-  if (r.dual && r.dual.compositeScores && r.dual.bestTime && r.dual.compositeScores[r.dual.bestTime]) {
-    var dcs = r.dual.compositeScores[r.dual.bestTime];
-    var dwf = dcs.wfScore !== null ? ' \\u00B7 WF ' + dcs.wfScore : '';
-    compParts.push('Dual @ ' + r.dual.bestTime + ': <strong>' + dcs.total + '/100</strong> (Ret ' + dcs.returnScore + ', DD ' + dcs.ddScore + ', Nbr ' + dcs.neighborScore + dwf + ')');
-  }
-  if (r.single && r.single.compositeScores && r.single.bestTime && r.single.compositeScores[r.single.bestTime]) {
-    var scs = r.single.compositeScores[r.single.bestTime];
-    var swf = scs.wfScore !== null ? ' \\u00B7 WF ' + scs.wfScore : '';
-    compParts.push('Single @ ' + r.single.bestTime + ': <strong>' + scs.total + '/100</strong> (Ret ' + scs.returnScore + ', DD ' + scs.ddScore + ', Nbr ' + scs.neighborScore + swf + ')');
-  }
-  if (compParts.length > 0) {
-    html += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">' + compParts.join(' &nbsp;|&nbsp; ') + '</div>';
-  }
-
   // Walk-forward sections
   if (r.dual && r.dual.walkforward) {
-    html += renderWalkforwardHTML(r.dual.walkforward, 'Dual');
+    html += renderWalkforwardHTML(r.dual.walkforward, 'Dual', 'DUAL');
   }
   if (r.single && r.single.walkforward) {
-    html += renderWalkforwardHTML(r.single.walkforward, '@' + r.single.bestTime);
+    html += renderWalkforwardHTML(r.single.walkforward, 'Single @' + r.single.bestTime, 'SINGLE');
   }
 
   html += '</div></div>';

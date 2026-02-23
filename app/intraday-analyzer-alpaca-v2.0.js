@@ -3710,6 +3710,7 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
       const lastDay = tradingDays[tradingDays.length - 1];
       getAssetsWithWeights(score, dailyData, intradayData, lastDay, CONFIG.EOD_TIME, 1.0, true);
 
+      const _tStart = Date.now();
       const eodResult = runEODOnlyBacktest(score, dailyData, intradayData, tradingDays, rbThreshold);
 
       const timeResults = {};
@@ -3725,6 +3726,7 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
           equityCurve: dualResult.equityCurve
         };
       }
+      const _tBacktest = Date.now();
 
       // Check for no trades (0% return and 0% drawdown)
       const noTrades = Math.abs(eodResult.cumReturn) < 0.01 && Math.abs(eodResult.maxDD) < 0.01;
@@ -3737,6 +3739,8 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
       if (!quiet && CONFIG.walkforward) console.log(`  Computing walk-forward for all ${CONFIG.TEST_TIMES.length} times...`);
       const selection = selectBestTime(timeResults, eodResult, tradingDays,
         CONFIG.TEST_TIMES, CONFIG.walkforward, CONFIG.wfWindowSize, CONFIG.wfStepSize);
+      const _tWF = Date.now();
+      if (!quiet) console.log(`  Timing: ${CONFIG.TEST_TIMES.length} backtests ${((_tBacktest - _tStart)/1000).toFixed(1)}s, scoring+WF ${((_tWF - _tBacktest)/1000).toFixed(1)}s, total ${((_tWF - _tStart)/1000).toFixed(1)}s`);
       const bestTime = selection.bestTime;
       const bestImprovement = selection.bestImprovement;
       let walkforward = selection.walkforwardResults[bestTime] || null;
@@ -3818,6 +3822,7 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
       const lastDay = tradingDays[tradingDays.length - 1];
       getAssetsWithWeights(score, dailyData, intradayData, lastDay, CONFIG.EOD_TIME, 1.0, true);
 
+      const _tStart = Date.now();
       const eodResult = runSingleTimeBacktest(score, dailyData, intradayData, tradingDays, CONFIG.EOD_TIME, rbThreshold);
 
       const timeResults = {};
@@ -3833,6 +3838,7 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
           equityCurve: result.equityCurve
         };
       }
+      const _tBacktest = Date.now();
 
       // Check for no trades (0% return and 0% drawdown)
       const noTrades = Math.abs(eodResult.cumReturn) < 0.01 && Math.abs(eodResult.maxDD) < 0.01;
@@ -3845,6 +3851,8 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
       if (!quiet && CONFIG.walkforward) console.log(`  Computing walk-forward for all ${CONFIG.TEST_TIMES.length} times...`);
       const selection = selectBestTime(timeResults, eodResult, tradingDays,
         CONFIG.TEST_TIMES, CONFIG.walkforward, CONFIG.wfWindowSize, CONFIG.wfStepSize);
+      const _tWF = Date.now();
+      if (!quiet) console.log(`  Timing: ${CONFIG.TEST_TIMES.length} backtests ${((_tBacktest - _tStart)/1000).toFixed(1)}s, scoring+WF ${((_tWF - _tBacktest)/1000).toFixed(1)}s, total ${((_tWF - _tStart)/1000).toFixed(1)}s`);
       let bestTime = selection.bestTime;
       const bestImprovement = selection.bestImprovement;
 
