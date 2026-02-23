@@ -725,7 +725,7 @@ const FRONTEND_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Intraday Execution Analyzer v2.0</title>
+<title>Intraday Execution Analyzer v2.1.1</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -1056,7 +1056,7 @@ const FRONTEND_HTML = `<!DOCTYPE html>
 <body>
 
 <div class="header">
-  <h1>Intraday Execution Analyzer <span>v2.0</span></h1>
+  <h1>Intraday Execution Analyzer <span>v2.1.1</span></h1>
   <div class="header-right">
     <span class="status-dot" id="alpacaDot"></span>
     <span class="status-label" id="alpacaLabel">Alpaca</span>
@@ -1709,7 +1709,12 @@ function renderCombinedSummaryTable(results) {
     { key: 'singleScore', label: 'Single Score', cls: 'num' },
   ];
 
-  var getQL = analyzer.getCompositeQuality;
+  var getQL = function(s) {
+    if (s >= 75) return { label: 'STRONG', htmlColor: '#3fb950' };
+    if (s >= 55) return { label: 'GOOD', htmlColor: '#58a6ff' };
+    if (s >= 40) return { label: 'MARGINAL', htmlColor: '#d29922' };
+    return { label: 'WEAK', htmlColor: '#f85149' };
+  };
 
   var rows = results.map(function(r) {
     var eod = r.eod.cumReturn;
@@ -1904,7 +1909,12 @@ function renderCombinedDetailCard(r) {
   // Determine recommendation first
   var dcsData = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
   var scsData = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
-  var getQL2 = analyzer.getCompositeQuality;
+  var getQL2 = function(s) {
+    if (s >= 75) return { label: 'STRONG', htmlColor: '#3fb950', bgColor: 'rgba(63,185,80,0.12)', borderColor: 'rgba(63,185,80,0.3)' };
+    if (s >= 55) return { label: 'GOOD', htmlColor: '#58a6ff', bgColor: 'rgba(88,166,255,0.12)', borderColor: 'rgba(88,166,255,0.3)' };
+    if (s >= 40) return { label: 'MARGINAL', htmlColor: '#d29922', bgColor: 'rgba(210,153,34,0.12)', borderColor: 'rgba(210,153,34,0.3)' };
+    return { label: 'WEAK', htmlColor: '#f85149', bgColor: 'rgba(248,81,73,0.12)', borderColor: 'rgba(248,81,73,0.3)' };
+  };
   var eodAbs2 = Math.abs(r.eod.cumReturn);
   var dRelPct = eodAbs2 > 1 ? (r.dual.improvement / eodAbs2) * 100 : r.dual.improvement * 10;
   var sRelPct = eodAbs2 > 1 ? (r.single.improvement / eodAbs2) * 100 : r.single.improvement * 10;
