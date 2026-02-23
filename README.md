@@ -2,20 +2,15 @@
 
 Find the best time of day to execute your [Composer.trade](https://www.composer.trade) strategies. Instead of using Composer's default execution window, this tool backtests every time slot from 9:30 AM to 3:45 PM using real intraday price data and shows you which execution time would have delivered the best risk-adjusted returns.
 
-<!-- Screenshots: save images to docs/screenshots/ and uncomment these -->
-<!-- ![GUI Dashboard](docs/screenshots/gui-dashboard.png) -->
-<!-- ![Combined Analysis Report](docs/screenshots/combined-report.png) -->
-<!-- ![Walk-Forward Validation](docs/screenshots/walkforward.png) -->
-
 ## Features
 
-- **Three analysis modes** — Dual (run at optimal time vs. EOD), Single (compare all times head-to-head), Combined (both + cross-validation)
-- **Walk-forward validation** — Rolling out-of-sample consistency check to distinguish real timing alpha from overfitting
-- **Robustness tiers** — Automated STRONG / MODERATE / WEAK / NONE classification based on peak shape, mode agreement, and walk-forward consistency
-- **Web GUI** — Browser-based dashboard with interactive charts and HTML report export
+- **Three analysis modes** — Dual (add morning trade + EOD), Single (replace EOD with a different time), Combined (both + cross-comparison)
+- **Composite scoring** — 4-axis quality score (Return, Drawdown, Neighbors, Walk-Forward) with labels: STRONG (75+), GOOD (55-74), MARGINAL (40-54), WEAK (<40)
+- **Walk-forward validation** — Rolling out-of-sample consistency check across ALL tested times at zero extra cost
+- **Web GUI** — Browser-based dashboard with interactive results and HTML report export
 - **Full CLI** — Scriptable command-line interface for automation and batch analysis
-- **Alpaca data** — Up to 2 years of 5-minute intraday bars via free Alpaca paper account (falls back to Yahoo Finance if no keys configured)
-- **Composer API integration** — Optionally connect your Composer account to browse and select strategies directly from your portfolio/watchlist
+- **Alpaca data** — Up to 2 years of 5-minute or 15-minute intraday bars via free Alpaca paper account
+- **Composer API integration** — Browse and select strategies directly from your portfolio/watchlist
 - **Zero dependencies** — Pure Node.js, no npm install required
 
 ## Quick Start
@@ -35,6 +30,20 @@ node app/gui-server.js
 ```
 
 On first launch, the Settings page will prompt you for API keys.
+
+## Project Structure
+
+```
+├── Intraday Analyzer.command   # macOS launcher (double-click)
+├── Intraday Analyzer.bat       # Windows launcher (double-click)
+├── package.json                # npm start / npm run cli
+├── reports/                    # Generated HTML reports (gitignored)
+├── app/
+│   ├── gui-server.js           # Web GUI server + report renderer
+│   ├── intraday-analyzer-alpaca-v2.0.js  # Core analysis engine + CLI
+│   ├── cache/                  # Cached price data (gitignored)
+│   └── walkforward_csvs/       # Walk-forward CSV exports (gitignored)
+```
 
 ## Getting API Keys
 
@@ -63,16 +72,16 @@ Composer keys let the analyzer browse your portfolio and watchlist to select str
 
 ### Web GUI
 
-1. Launch with `node app/gui-server.js`
-2. **Settings** (gear icon) — enter your API keys
+1. Launch with `node app/gui-server.js` (or `npm start`)
+2. **Settings** (gear icon) — enter your API keys and configure timeframe (5-min or 15-min)
 3. **Sidebar** — click "Load Portfolio" or "Load Watchlist" to see your strategies (requires Composer keys), or paste strategy IDs manually
 4. **Select** strategies using checkboxes
 5. **Choose mode** — Dual, Single, or Combined
 6. **Enable Walk-Forward** (checkbox, on by default) for out-of-sample validation
 7. Click **Run Analysis**
-8. View results inline or export as an HTML report
+8. View results inline or open saved HTML reports from the `reports/` folder
 
-> **First run warning:** The first analysis for a strategy downloads up to 2 years of intraday price data for every ticker in the strategy. For complex strategies with many tickers, this can take **several hours**. It's fine to leave it running overnight. After the first run, data is cached locally and subsequent analyses are much faster.
+> **First run warning:** The first analysis for a strategy downloads up to 2 years of intraday price data for every ticker in the strategy. For complex strategies with many tickers, this can take several minutes to hours. Data is cached locally and subsequent analyses are much faster.
 
 ### CLI
 
@@ -109,8 +118,8 @@ For each strategy, the analyzer:
 2. **Downloads intraday price data** for all tickers (5-min or 15-min bars from Alpaca)
 3. **Re-evaluates the strategy's conditions** at each candidate time using prices available at that moment
 4. **Simulates execution** — enters positions at the candidate time's prices instead of end-of-day
-5. **Compares returns** across all time slots to find the optimal execution window
-6. **Validates with walk-forward** — runs rolling out-of-sample windows to check if the edge persists
+5. **Compares returns** across all time slots using composite scoring (return improvement, drawdown quality, neighbor robustness, walk-forward consistency)
+6. **Validates with walk-forward** — rolling out-of-sample windows derived from equity curves at zero extra computation cost
 
 ## Security
 
