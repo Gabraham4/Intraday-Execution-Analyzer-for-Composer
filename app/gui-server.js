@@ -275,6 +275,62 @@ function buildReportHTML(r, mode) {
     body += '</tbody></table>';
     body += '</div>';
 
+    // Composite score boxes + recommendation (prominently after summary, before all-times)
+    var dualCS = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
+    var singleCS = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
+    var getQL = analyzer.getCompositeQuality;
+    var dualTotal = dualCS ? dualCS.total : 0;
+    var singleTotal = singleCS ? singleCS.total : 0;
+    var eodAbs = Math.abs(r.eod.cumReturn);
+    var dualRelPct = eodAbs > 1 ? (r.dual.improvement / eodAbs) * 100 : r.dual.improvement * 10;
+    var singleRelPct = eodAbs > 1 ? (r.single.improvement / eodAbs) * 100 : r.single.improvement * 10;
+    var dualViable = dualRelPct >= 10;
+    var singleViable = singleRelPct >= 10;
+    var bestMode, bestScore, bestImp, bestRel;
+    if (dualViable && singleViable) {
+      if (dualTotal >= singleTotal) { bestMode = 'Dual'; bestScore = dualTotal; bestImp = r.dual.improvement; bestRel = dualRelPct; }
+      else { bestMode = 'Single'; bestScore = singleTotal; bestImp = r.single.improvement; bestRel = singleRelPct; }
+    } else if (dualViable) { bestMode = 'Dual'; bestScore = dualTotal; bestImp = r.dual.improvement; bestRel = dualRelPct; }
+    else if (singleViable) { bestMode = 'Single'; bestScore = singleTotal; bestImp = r.single.improvement; bestRel = singleRelPct; }
+    else { bestMode = null; bestScore = 0; bestImp = 0; bestRel = 0; }
+
+    if (!bestMode) {
+      body += '<div class="rec-warn">NOT RECOMMENDED \u2014 Improvement too small relative to EOD returns</div>';
+    } else {
+      if (dualCS || singleCS) {
+        body += '<div style="display:flex;gap:8px;margin-bottom:10px">';
+        if (dualCS) {
+          var dq = getQL(dualCS.total);
+          body += '<div style="flex:1;padding:10px 12px;border-radius:6px;background:' + dq.bgColor + ';border:1px solid ' + dq.borderColor + ';line-height:1.6">';
+          body += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Dual @ ' + r.dual.bestTime + '</div>';
+          body += '<span style="font-size:20px;font-weight:700;color:' + dq.htmlColor + '">' + dq.label + ' ' + dualCS.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
+          body += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
+          body += 'Return ' + dualCS.returnScore + ' &middot; DD ' + dualCS.ddScore + ' &middot; Neighbors ' + dualCS.neighborScore;
+          if (dualCS.wfScore !== null) body += ' &middot; WF ' + dualCS.wfScore;
+          body += '</div></div>';
+        }
+        if (singleCS) {
+          var sq = getQL(singleCS.total);
+          body += '<div style="flex:1;padding:10px 12px;border-radius:6px;background:' + sq.bgColor + ';border:1px solid ' + sq.borderColor + ';line-height:1.6">';
+          body += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Single @ ' + r.single.bestTime + '</div>';
+          body += '<span style="font-size:20px;font-weight:700;color:' + sq.htmlColor + '">' + sq.label + ' ' + singleCS.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
+          body += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
+          body += 'Return ' + singleCS.returnScore + ' &middot; DD ' + singleCS.ddScore + ' &middot; Neighbors ' + singleCS.neighborScore;
+          if (singleCS.wfScore !== null) body += ' &middot; WF ' + singleCS.wfScore;
+          body += '</div></div>';
+        }
+        body += '</div>';
+      }
+      var cRecClass = bestScore >= 55 ? 'rec-add' : 'rec-keep';
+      var cRecText;
+      if (bestScore >= 55) {
+        cRecText = 'USE ' + bestMode.toUpperCase() + ' @ ' + (bestMode === 'Dual' ? r.dual.bestTime : r.single.bestTime) + ' (' + pct(bestImp, 1) + ', ' + (bestRel >= 0 ? '+' : '') + bestRel.toFixed(0) + '% relative)';
+      } else {
+        cRecText = bestMode + ' mode marginal (' + pct(bestImp, 1) + ', ' + (bestRel >= 0 ? '+' : '') + bestRel.toFixed(0) + '% relative) \u2014 proceed with caution';
+      }
+      body += '<div class="' + cRecClass + '">' + cRecText + '</div>';
+    }
+
     // Dual breakdown
     if (r.dual.times && Object.keys(r.dual.times).length > 0) {
       var dualKeys = testTimes.length > 0 ? testTimes : Object.keys(r.dual.times).sort();
@@ -323,64 +379,6 @@ function buildReportHTML(r, mode) {
       }
       body += '</tbody></table>';
       body += '</div>';
-    }
-
-    // Determine recommendation first (needed to decide layout)
-    var dualCS = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
-    var singleCS = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
-    var getQL = analyzer.getCompositeQuality;
-    var dualTotal = dualCS ? dualCS.total : 0;
-    var singleTotal = singleCS ? singleCS.total : 0;
-    var eodAbs = Math.abs(r.eod.cumReturn);
-    var dualRelPct = eodAbs > 1 ? (r.dual.improvement / eodAbs) * 100 : r.dual.improvement * 10;
-    var singleRelPct = eodAbs > 1 ? (r.single.improvement / eodAbs) * 100 : r.single.improvement * 10;
-    var dualViable = dualRelPct >= 10;
-    var singleViable = singleRelPct >= 10;
-    var bestMode, bestScore, bestImp, bestRel;
-    if (dualViable && singleViable) {
-      if (dualTotal >= singleTotal) { bestMode = 'Dual'; bestScore = dualTotal; bestImp = r.dual.improvement; bestRel = dualRelPct; }
-      else { bestMode = 'Single'; bestScore = singleTotal; bestImp = r.single.improvement; bestRel = singleRelPct; }
-    } else if (dualViable) { bestMode = 'Dual'; bestScore = dualTotal; bestImp = r.dual.improvement; bestRel = dualRelPct; }
-    else if (singleViable) { bestMode = 'Single'; bestScore = singleTotal; bestImp = r.single.improvement; bestRel = singleRelPct; }
-    else { bestMode = null; bestScore = 0; bestImp = 0; bestRel = 0; }
-
-    if (!bestMode) {
-      // NOT RECOMMENDED — show prominently at top, skip score boxes
-      body += '<div class="rec-warn">NOT RECOMMENDED \u2014 Improvement too small relative to EOD returns</div>';
-    } else {
-      // Show score boxes, then recommendation
-      if (dualCS || singleCS) {
-        body += '<div style="display:flex;gap:8px;margin-bottom:10px">';
-        if (dualCS) {
-          var dq = getQL(dualCS.total);
-          body += '<div style="flex:1;padding:10px 12px;border-radius:6px;background:' + dq.bgColor + ';border:1px solid ' + dq.borderColor + ';line-height:1.6">';
-          body += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Dual @ ' + r.dual.bestTime + '</div>';
-          body += '<span style="font-size:20px;font-weight:700;color:' + dq.htmlColor + '">' + dq.label + ' ' + dualCS.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
-          body += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
-          body += 'Return ' + dualCS.returnScore + ' &middot; DD ' + dualCS.ddScore + ' &middot; Neighbors ' + dualCS.neighborScore;
-          if (dualCS.wfScore !== null) body += ' &middot; WF ' + dualCS.wfScore;
-          body += '</div></div>';
-        }
-        if (singleCS) {
-          var sq = getQL(singleCS.total);
-          body += '<div style="flex:1;padding:10px 12px;border-radius:6px;background:' + sq.bgColor + ';border:1px solid ' + sq.borderColor + ';line-height:1.6">';
-          body += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Single @ ' + r.single.bestTime + '</div>';
-          body += '<span style="font-size:20px;font-weight:700;color:' + sq.htmlColor + '">' + sq.label + ' ' + singleCS.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
-          body += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
-          body += 'Return ' + singleCS.returnScore + ' &middot; DD ' + singleCS.ddScore + ' &middot; Neighbors ' + singleCS.neighborScore;
-          if (singleCS.wfScore !== null) body += ' &middot; WF ' + singleCS.wfScore;
-          body += '</div></div>';
-        }
-        body += '</div>';
-      }
-      var cRecClass = bestScore >= 55 ? 'rec-add' : 'rec-keep';
-      var cRecText;
-      if (bestScore >= 55) {
-        cRecText = 'USE ' + bestMode.toUpperCase() + ' @ ' + (bestMode === 'Dual' ? r.dual.bestTime : r.single.bestTime) + ' (' + pct(bestImp, 1) + ', ' + (bestRel >= 0 ? '+' : '') + bestRel.toFixed(0) + '% relative)';
-      } else {
-        cRecText = bestMode + ' mode marginal (' + pct(bestImp, 1) + ', ' + (bestRel >= 0 ? '+' : '') + bestRel.toFixed(0) + '% relative) \u2014 proceed with caution';
-      }
-      body += '<div class="' + cRecClass + '">' + cRecText + '</div>';
     }
 
     // Walk-forward for combined
