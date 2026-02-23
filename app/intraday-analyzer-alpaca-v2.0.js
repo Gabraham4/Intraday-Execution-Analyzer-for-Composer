@@ -3476,21 +3476,18 @@ function selectBestTime(timeResults, eodResult, tradingDays, testTimes, wfEnable
     returnScores[t] = times.length > 1 ? avgRank / (times.length - 1) : 1;
   }
 
-  // --- Axis 2: DD quality (relative normalization across tested times) ---
+  // --- Axis 2: DD quality (absolute comparison vs EOD baseline) ---
+  // Better than EOD or within 2% = full score (1.0)
+  // Linear decay from 2% to 15% worse than EOD
+  // 15%+ worse than EOD = 0
   const eodDD = eodResult.maxDD;
-  const ddDeltas = times.map(t => timeResults[t].maxDD - eodDD); // positive = worse
-  const worstDDDelta = Math.max(...ddDeltas);
-  const bestDDDelta = Math.min(...ddDeltas);
-  const ddRange = worstDDDelta - bestDDDelta;
-
   const ddScores = {};
   for (const t of times) {
-    const ddDelta = timeResults[t].maxDD - eodDD;
-    if (ddRange > 0.01) {
-      // Normalize: best DD gets 1.0, worst gets 0.0
-      ddScores[t] = 1.0 - ((ddDelta - bestDDDelta) / ddRange);
+    const ddDelta = timeResults[t].maxDD - eodDD; // positive = worse than EOD
+    if (ddDelta <= 2) {
+      ddScores[t] = 1.0; // Better than EOD or within 2% tolerance
     } else {
-      ddScores[t] = 1.0; // All DDs essentially equal
+      ddScores[t] = Math.max(0, 1.0 - (ddDelta - 2) / 13); // Linear decay 2-15%
     }
   }
 
