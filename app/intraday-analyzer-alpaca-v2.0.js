@@ -4523,10 +4523,18 @@ function computeWalkforwardSignal(r) {
 function computeRobustnessTier(r, testTimes) {
   if (!testTimes) testTimes = CONFIG.TEST_TIMES;
 
-  // Use the recommended mode's times for peak analysis
-  const dualBetter = (r.dual.improvement || 0) >= (r.single.improvement || 0);
-  const modeTimes = dualBetter ? r.dual.times : r.single.times;
-  const modeBestTime = dualBetter ? r.dual.bestTime : r.single.bestTime;
+  // Check relative improvement threshold — if neither mode passes 10%, cap at T4
+  const eodAbs = Math.abs(r.eod.cumReturn);
+  const dualRelPct = eodAbs > 1 ? ((r.dual.improvement || 0) / eodAbs) * 100 : (r.dual.improvement || 0) * 10;
+  const singleRelPct = eodAbs > 1 ? ((r.single.improvement || 0) / eodAbs) * 100 : (r.single.improvement || 0) * 10;
+  const neitherViable = dualRelPct < 10 && singleRelPct < 10;
+
+  // Use composite-selected mode for peak analysis (not raw improvement)
+  const dualCS = (r.dual.compositeScores && r.dual.bestTime) ? (r.dual.compositeScores[r.dual.bestTime]?.total || 0) : 0;
+  const singleCS = (r.single.compositeScores && r.single.bestTime) ? (r.single.compositeScores[r.single.bestTime]?.total || 0) : 0;
+  const useDual = dualRelPct >= 10 && (dualCS >= singleCS || singleRelPct < 10);
+  const modeTimes = useDual ? r.dual.times : r.single.times;
+  const modeBestTime = useDual ? r.dual.bestTime : r.single.bestTime;
 
   const peak = computeTimeRobustness(modeTimes, modeBestTime, testTimes);
   const agreement = computeDualSingleAgreement(r, testTimes);
@@ -4535,7 +4543,10 @@ function computeRobustnessTier(r, testTimes) {
   const totalScore = peak.score + agreement.score + walkforward.score;
 
   let tier, tierLabel;
-  if (totalScore >= 7) { tier = 1; tierLabel = 'ROBUST'; }
+  if (neitherViable) {
+    // Neither mode has meaningful relative improvement — cap at T4
+    tier = 4; tierLabel = 'NOT RECOMMENDED';
+  } else if (totalScore >= 7) { tier = 1; tierLabel = 'ROBUST'; }
   else if (totalScore >= 5) { tier = 2; tierLabel = 'PROMISING'; }
   else if (totalScore >= 3) { tier = 3; tierLabel = 'SPECULATIVE'; }
   else { tier = 4; tierLabel = 'AVOID'; }
