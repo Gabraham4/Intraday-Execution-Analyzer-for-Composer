@@ -658,6 +658,7 @@ async function handleRequest(req, res) {
       const body = await parseBody(req);
       const guiUpdates = {};
 
+      const oldTimeframe = analyzer.CONFIG.ALPACA_TIMEFRAME;
       if (body.alpacaTimeframe && ['15Min', '5Min'].includes(body.alpacaTimeframe)) {
         analyzer.CONFIG.ALPACA_TIMEFRAME = body.alpacaTimeframe;
         guiUpdates.alpacaTimeframe = body.alpacaTimeframe;
@@ -678,6 +679,20 @@ async function handleRequest(req, res) {
       if (body.testTimes && Array.isArray(body.testTimes) && body.testTimes.length > 0) {
         analyzer.CONFIG.TEST_TIMES = body.testTimes;
         guiUpdates.testTimes = body.testTimes;
+      } else if (body.alpacaTimeframe && body.alpacaTimeframe !== oldTimeframe) {
+        // Timeframe changed without explicit test times — auto-regenerate
+        const step = body.alpacaTimeframe === '5Min' ? 5 : 15;
+        const endM = body.alpacaTimeframe === '5Min' ? 55 : 45;
+        const newTimes = [];
+        let h = 9, m = 30;
+        while (h < 15 || (h === 15 && m <= endM)) {
+          newTimes.push(String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0'));
+          m += step;
+          if (m >= 60) { h++; m -= 60; }
+        }
+        analyzer.CONFIG.TEST_TIMES = newTimes;
+        guiUpdates.testTimes = newTimes;
+        console.log(`Timeframe changed ${oldTimeframe} → ${body.alpacaTimeframe}: regenerated ${newTimes.length} test times`);
       }
 
       // Persist to gui-settings.json
