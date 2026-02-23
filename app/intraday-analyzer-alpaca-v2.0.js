@@ -4332,18 +4332,21 @@ function printCombinedResults(results) {
 
     console.log(`\n  BASELINE (EOD-Only @ ${CONFIG.EOD_TIME}):  Return: ${r.eod.cumReturn >= 0 ? '+' : ''}${r.eod.cumReturn.toFixed(1)}%  |  Max DD: ${r.eod.maxDD.toFixed(1)}%\n`);
 
-    // Robustness Tier
-    const tier = computeRobustnessTier(r, CONFIG.TEST_TIMES);
-    const tierColors = { 1: '\x1b[32m', 2: '\x1b[34m', 3: '\x1b[33m', 4: '\x1b[31m' };
+    // Composite quality labels for each mode
     const reset = '\x1b[0m';
-    const tc = tierColors[tier.tier] || '';
-    console.log(`  \u250C${'─'.repeat(73)}\u2510`);
-    console.log(`  \u2502  ${tc}ROBUSTNESS TIER: T${tier.tier} \u2014 ${tier.tierLabel} (score ${tier.totalScore}/9)${reset}${' '.repeat(Math.max(0, 36 - tier.tierLabel.length - String(tier.totalScore).length))}  \u2502`);
-    console.log(`  \u2502${' '.repeat(73)}\u2502`);
-    console.log(`  \u2502  Peak Shape:     ${tier.peak.label.padEnd(9)} (${tier.peak.score}/3) \u2014 ${tier.peak.detail.substring(0, 35).padEnd(35)}  \u2502`);
-    console.log(`  \u2502  Dual/Single:    ${tier.agreement.label.padEnd(9)} (${tier.agreement.score}/3) \u2014 ${tier.agreement.detail.substring(0, 35).padEnd(35)}  \u2502`);
-    console.log(`  \u2502  Walk-Forward:   ${tier.walkforward.label.padEnd(9)} (${tier.walkforward.score}/3) \u2014 ${tier.walkforward.detail.substring(0, 35).padEnd(35)}  \u2502`);
-    console.log(`  \u2514${'─'.repeat(73)}\u2518\n`);
+    const dualCS = (r.dual.compositeScores && r.dual.bestTime && r.dual.compositeScores[r.dual.bestTime]) ? r.dual.compositeScores[r.dual.bestTime] : null;
+    const singleCS = (r.single.compositeScores && r.single.bestTime && r.single.compositeScores[r.single.bestTime]) ? r.single.compositeScores[r.single.bestTime] : null;
+    if (dualCS) {
+      const dq = getCompositeQuality(dualCS.total);
+      const wfP = dualCS.wfScore !== null ? `, WF ${dualCS.wfScore}` : '';
+      console.log(`  DUAL @ ${r.dual.bestTime}:   ${dq.color}${dq.label} ${dualCS.total}/100${reset} (Return ${dualCS.returnScore}, DD ${dualCS.ddScore}, Neighbors ${dualCS.neighborScore}${wfP})`);
+    }
+    if (singleCS) {
+      const sq = getCompositeQuality(singleCS.total);
+      const wfP = singleCS.wfScore !== null ? `, WF ${singleCS.wfScore}` : '';
+      console.log(`  SINGLE @ ${r.single.bestTime}: ${sq.color}${sq.label} ${singleCS.total}/100${reset} (Return ${singleCS.returnScore}, DD ${singleCS.ddScore}, Neighbors ${singleCS.neighborScore}${wfP})`);
+    }
+    console.log('');
 
     console.log('  COMPARISON:');
     console.log('  ┌─────────────┬─────────────┬─────────────────┬─────────────────┬─────────────────┐');
@@ -4369,17 +4372,6 @@ function printCombinedResults(results) {
       console.log(`  ⚠️  WARNING: ${rec.warning}`);
     }
 
-    // Composite score breakdown for both modes
-    if (r.dual.compositeScores && r.dual.bestTime && r.dual.compositeScores[r.dual.bestTime]) {
-      const cs = r.dual.compositeScores[r.dual.bestTime];
-      const wfPart = cs.wfScore !== null ? `, WF ${cs.wfScore}` : '';
-      console.log(`  DUAL SELECTION:   Composite ${cs.total}/100 (Return ${cs.returnScore}, DD ${cs.ddScore}, Neighbors ${cs.neighborScore}${wfPart})`);
-    }
-    if (r.single.compositeScores && r.single.bestTime && r.single.compositeScores[r.single.bestTime]) {
-      const cs = r.single.compositeScores[r.single.bestTime];
-      const wfPart = cs.wfScore !== null ? `, WF ${cs.wfScore}` : '';
-      console.log(`  SINGLE SELECTION: Composite ${cs.total}/100 (Return ${cs.returnScore}, DD ${cs.ddScore}, Neighbors ${cs.neighborScore}${wfPart})`);
-    }
     console.log('');
 
     if (r.dual.walkforward) {
@@ -4396,165 +4388,20 @@ function printCombinedResults(results) {
   }
 }
 
-// ── Robustness Tier Scoring ────────────────────────────────────────────────
+// ── Composite Quality Label ───────────────────────────────────────────────
 
 /**
- * Score peak shape: is the best time a robust peak or an isolated spike?
- * Examines ±1 and ±2 neighbors in sorted test times.
- * Returns { score: 0-3, label, detail }
+ * Derive a quality label from composite score.
+ * Returns { label, color (ansi), htmlColor, bgColor, borderColor }
  */
-function computeTimeRobustness(times, bestTime, testTimes) {
-  if (!times || !bestTime || !testTimes || testTimes.length === 0) {
-    return { score: 0, label: 'ISOLATED', detail: 'No time data' };
-  }
-
-  const sorted = testTimes.filter(t => times[t]);
-  const bestIdx = sorted.indexOf(bestTime);
-  if (bestIdx < 0) {
-    return { score: 0, label: 'ISOLATED', detail: 'Best time not in test set' };
-  }
-
-  const bestImp = times[bestTime].improvement || 0;
-  // Gather neighbor improvements at ±1, ±2
-  const neighbors = [];
-  for (const offset of [-2, -1, 1, 2]) {
-    const idx = bestIdx + offset;
-    if (idx >= 0 && idx < sorted.length) {
-      neighbors.push({
-        offset: Math.abs(offset),
-        imp: times[sorted[idx]].improvement || 0
-      });
-    }
-  }
-
-  const positiveNeighbors = neighbors.filter(n => n.imp > 0);
-  const close = neighbors.filter(n => n.offset === 1 && n.imp > 0);
-  const far = neighbors.filter(n => n.offset === 2 && n.imp > 0);
-
-  // Check gradient: close neighbors should have higher improvement than far ones
-  let hasGradient = false;
-  if (close.length > 0 && far.length > 0) {
-    const avgClose = close.reduce((s, n) => s + n.imp, 0) / close.length;
-    const avgFar = far.reduce((s, n) => s + n.imp, 0) / far.length;
-    hasGradient = avgClose > avgFar;
-  } else if (close.length > 0 && far.length === 0) {
-    // Edge of range — gradient implied if close neighbors are positive
-    hasGradient = true;
-  }
-
-  if (positiveNeighbors.length >= 3 && hasGradient) {
-    return { score: 3, label: 'ROBUST', detail: `${positiveNeighbors.length} neighbors positive, gradient present` };
-  }
-  if (positiveNeighbors.length >= 2 || (positiveNeighbors.length >= 1 && hasGradient)) {
-    return { score: 2, label: 'MODERATE', detail: `${positiveNeighbors.length} neighbors positive${hasGradient ? ', gradient' : ''}` };
-  }
-  if (positiveNeighbors.length >= 1) {
-    return { score: 1, label: 'NARROW', detail: `${positiveNeighbors.length} neighbor positive, no gradient` };
-  }
-  return { score: 0, label: 'ISOLATED', detail: 'No positive neighbors' };
+function getCompositeQuality(score) {
+  if (score >= 75) return { label: 'STRONG', color: '\x1b[32m', htmlColor: '#3fb950', bgColor: 'rgba(63,185,80,0.12)', borderColor: 'rgba(63,185,80,0.3)' };
+  if (score >= 55) return { label: 'GOOD', color: '\x1b[34m', htmlColor: '#58a6ff', bgColor: 'rgba(88,166,255,0.12)', borderColor: 'rgba(88,166,255,0.3)' };
+  if (score >= 40) return { label: 'MARGINAL', color: '\x1b[33m', htmlColor: '#d29922', bgColor: 'rgba(210,153,34,0.12)', borderColor: 'rgba(210,153,34,0.3)' };
+  return { label: 'WEAK', color: '\x1b[31m', htmlColor: '#f85149', bgColor: 'rgba(248,81,73,0.12)', borderColor: 'rgba(248,81,73,0.3)' };
 }
 
-/**
- * Score dual/single agreement: do both modes corroborate?
- * Returns { score: 0-3, label, detail }
- */
-function computeDualSingleAgreement(r, testTimes) {
-  const dualImp = r.dual.improvement || 0;
-  const singleImp = r.single.improvement || 0;
-  const dualTime = r.dual.bestTime;
-  const singleTime = r.single.bestTime;
-
-  // Time distance in test slots
-  const sorted = testTimes || [];
-  const dualIdx = sorted.indexOf(dualTime);
-  const singleIdx = sorted.indexOf(singleTime);
-  const timeDistance = (dualIdx >= 0 && singleIdx >= 0) ? Math.abs(dualIdx - singleIdx) : 999;
-  const sameOrAdj = timeDistance <= 1;
-  const within2 = timeDistance <= 2;
-
-  const bothPositive = dualImp > 0 && singleImp > 0;
-  const bothSignificant = dualImp > 2 && singleImp > 2;
-
-  if (bothSignificant && sameOrAdj) {
-    return { score: 3, label: 'STRONG', detail: `Both >${2}%, ${sameOrAdj ? 'same' : 'adjacent'} best time` };
-  }
-  if (bothPositive && within2) {
-    return { score: 2, label: 'MODERATE', detail: `Both positive, times within 2 slots` };
-  }
-  if (bothPositive) {
-    return { score: 1, label: 'WEAK', detail: `Both positive but different optimal times` };
-  }
-  // Only one shows improvement, or conflicting
-  const which = dualImp > singleImp ? 'Dual' : 'Single';
-  return { score: 0, label: 'DIVERGENT', detail: `Only ${which} shows improvement` };
-}
-
-/**
- * Score walk-forward validation signal.
- * Uses WF from the recommended mode (dual preferred).
- * Returns { score: 0-3, label, detail }
- */
-function computeWalkforwardSignal(r) {
-  // Prefer dual WF, fall back to single
-  const wf = (r.dual && r.dual.walkforward) || (r.single && r.single.walkforward);
-  if (!wf || !wf.summary || wf.summary.verdict === 'INSUFFICIENT_DATA') {
-    return { score: 0, label: 'WEAK', detail: 'No WF data' };
-  }
-
-  const s = wf.summary;
-  const recentStrong = s.recentWins >= 2; // 2/3+ recent wins
-
-  if (s.verdict === 'CONSISTENT' && recentStrong) {
-    return { score: 3, label: 'STRONG', detail: `CONSISTENT ${(s.winRate * 100).toFixed(0)}%, recent ${s.recentWins}/3` };
-  }
-  if (s.verdict === 'CONSISTENT') {
-    return { score: 2, label: 'GOOD', detail: `CONSISTENT ${(s.winRate * 100).toFixed(0)}%, recent ${s.recentWins}/3` };
-  }
-  if (s.verdict === 'EPISODIC' && s.avgAlpha > 0) {
-    return { score: 1, label: 'MIXED', detail: `EPISODIC, avg alpha ${s.avgAlpha >= 0 ? '+' : ''}${s.avgAlpha.toFixed(2)}%` };
-  }
-  return { score: 0, label: 'WEAK', detail: `${s.verdict}, avg alpha ${s.avgAlpha >= 0 ? '+' : ''}${s.avgAlpha.toFixed(2)}%` };
-}
-
-/**
- * Compute overall robustness tier for a combined result.
- * Returns { tier, tierLabel, totalScore, peak, agreement, walkforward }
- */
-function computeRobustnessTier(r, testTimes) {
-  if (!testTimes) testTimes = CONFIG.TEST_TIMES;
-
-  // Check relative improvement threshold — if neither mode passes 10%, cap at T4
-  const eodAbs = Math.abs(r.eod.cumReturn);
-  const dualRelPct = eodAbs > 1 ? ((r.dual.improvement || 0) / eodAbs) * 100 : (r.dual.improvement || 0) * 10;
-  const singleRelPct = eodAbs > 1 ? ((r.single.improvement || 0) / eodAbs) * 100 : (r.single.improvement || 0) * 10;
-  const neitherViable = dualRelPct < 10 && singleRelPct < 10;
-
-  // Use composite-selected mode for peak analysis (not raw improvement)
-  const dualCS = (r.dual.compositeScores && r.dual.bestTime) ? (r.dual.compositeScores[r.dual.bestTime]?.total || 0) : 0;
-  const singleCS = (r.single.compositeScores && r.single.bestTime) ? (r.single.compositeScores[r.single.bestTime]?.total || 0) : 0;
-  const useDual = dualRelPct >= 10 && (dualCS >= singleCS || singleRelPct < 10);
-  const modeTimes = useDual ? r.dual.times : r.single.times;
-  const modeBestTime = useDual ? r.dual.bestTime : r.single.bestTime;
-
-  const peak = computeTimeRobustness(modeTimes, modeBestTime, testTimes);
-  const agreement = computeDualSingleAgreement(r, testTimes);
-  const walkforward = computeWalkforwardSignal(r);
-
-  const totalScore = peak.score + agreement.score + walkforward.score;
-
-  let tier, tierLabel;
-  if (neitherViable) {
-    // Neither mode has meaningful relative improvement — cap at T4
-    tier = 4; tierLabel = 'NOT RECOMMENDED';
-  } else if (totalScore >= 7) { tier = 1; tierLabel = 'ROBUST'; }
-  else if (totalScore >= 5) { tier = 2; tierLabel = 'PROMISING'; }
-  else if (totalScore >= 3) { tier = 3; tierLabel = 'SPECULATIVE'; }
-  else { tier = 4; tierLabel = 'AVOID'; }
-
-  return { tier, tierLabel, totalScore, peak, agreement, walkforward };
-}
-
-// ── End Robustness Tier Scoring ───────────────────────────────────────────
+// ── End Composite Quality Label ──────────────────────────────────────────
 
 function generateCombinedRecommendation(r) {
   // Get composite scores for the selected best time in each mode
@@ -4574,8 +4421,8 @@ function generateCombinedRecommendation(r) {
   const singleRelPct = eodAbs > 1 ? (r.single.improvement / eodAbs) * 100 : r.single.improvement * 10;
   const REL_THRESHOLD = 10; // Need >= 10% relative improvement to recommend
 
-  // Thresholds
-  const strongScore = 60;
+  // Thresholds — aligned with quality labels (STRONG 75+, GOOD 55+, MARGINAL 40+, WEAK <40)
+  const strongScore = 55;
   const marginalScore = 40;
 
   let text = '';
@@ -4616,23 +4463,13 @@ function generateCombinedRecommendation(r) {
 
   // Generate recommendation text — always show both scores
   if (preferDual) {
-    if (dualScore >= strongScore) {
-      text = `USE DUAL MODE @ ${r.dual.bestTime}. ${comparison}`;
-    } else if (dualScore >= marginalScore) {
-      text = `PREFER DUAL @ ${r.dual.bestTime}. ${comparison}`;
-    } else {
-      text = `MARGINAL: DUAL @ ${r.dual.bestTime}. ${comparison}`;
-    }
+    const q = getCompositeQuality(dualScore);
+    text = `USE DUAL @ ${r.dual.bestTime} (${q.label}). ${comparison}`;
     if (dualDDWorse) warning = `Drawdown increases from ${r.eod.maxDD.toFixed(1)}% to ${r.dual.bestDD.toFixed(1)}%`;
     if (dualHasHighDD) warning = (warning ? warning + ' | ' : '') + `High drawdown risk (${r.dual.bestDD.toFixed(1)}%)`;
   } else if (preferSingle) {
-    if (singleScore >= strongScore) {
-      text = `USE SINGLE MODE @ ${r.single.bestTime}. ${comparison}`;
-    } else if (singleScore >= marginalScore) {
-      text = `PREFER SINGLE @ ${r.single.bestTime}. ${comparison}`;
-    } else {
-      text = `MARGINAL: SINGLE @ ${r.single.bestTime}. ${comparison}`;
-    }
+    const q = getCompositeQuality(singleScore);
+    text = `USE SINGLE @ ${r.single.bestTime} (${q.label}). ${comparison}`;
     if (singleDDWorse) warning = `Drawdown increases from ${r.eod.maxDD.toFixed(1)}% to ${r.single.bestDD.toFixed(1)}%`;
     if (singleHasHighDD) warning = (warning ? warning + ' | ' : '') + `High drawdown risk (${r.single.bestDD.toFixed(1)}%)`;
   } else {
@@ -4693,9 +4530,9 @@ function printCombinedSummaryTable(results) {
   console.log('  COMBINED SUMMARY');
   console.log(`${'═'.repeat(totalWidth + 4)}\n`);
 
-  // Column headers: Strategy | Days | EOD Ret | EOD DD | Dual Time | Dual Imp | Dual DD | Single Time | Single Imp | Single DD | Best | Tier
+  // Column headers: Strategy | Days | EOD Ret | EOD DD | Dual Time | Dual Imp | Dual DD | Single Time | Single Imp | Single DD | Best | Score
   console.log(`  ┌${'─'.repeat(nameCol)}┬───────┬─────────┬─────────┬───────────┬──────────┬─────────┬─────────────┬────────────┬─────────┬────────────┬────────┐`);
-  console.log(`  │ ${'Strategy'.padEnd(nameCol - 2)} │ Days  │ EOD Ret │  EOD DD │ Dual Time │ Dual Imp │ Dual DD │ Single Time │ Single Imp │ Sngl DD │    Best    │  Tier  │`);
+  console.log(`  │ ${'Strategy'.padEnd(nameCol - 2)} │ Days  │ EOD Ret │  EOD DD │ Dual Time │ Dual Imp │ Dual DD │ Single Time │ Single Imp │ Sngl DD │    Best    │ Score  │`);
   console.log(`  ├${'─'.repeat(nameCol)}┼───────┼─────────┼─────────┼───────────┼──────────┼─────────┼─────────────┼────────────┼─────────┼────────────┼────────┤`);
 
   for (let idx = 0; idx < validResults.length; idx++) {
@@ -4725,15 +4562,17 @@ function printCombinedSummaryTable(results) {
 
     const bestStr = hasWarning ? `${best} ⚠️` : best;
 
-    // Tier
-    const tier = computeRobustnessTier(r, CONFIG.TEST_TIMES);
-    const tierStr = `T${tier.tier}(${tier.totalScore})`;
+    // Best composite score (from whichever mode the recommendation prefers)
+    const dualCS = (r.dual.compositeScores && r.dual.bestTime && r.dual.compositeScores[r.dual.bestTime]) ? r.dual.compositeScores[r.dual.bestTime].total : 0;
+    const singleCS = (r.single.compositeScores && r.single.bestTime && r.single.compositeScores[r.single.bestTime]) ? r.single.compositeScores[r.single.bestTime].total : 0;
+    const topScore = Math.max(dualCS, singleCS);
+    const scoreStr = topScore > 0 ? `${topScore}` : '-';
 
     // Wrap long names
     const nameLines = wrapText(r.name, maxNameWidth);
 
     // First line with data
-    console.log(`  │ ${padEndDisplay(nameLines[0], nameCol - 2)} │ ${String(r.tradingDays).padStart(5)} │ ${eodRet.padStart(7)} │ ${eodDD.padStart(7)} │ ${dualTime.padStart(9)} │ ${dualImp.padStart(8)} │ ${dualDD.padStart(7)} │ ${singleTime.padStart(11)} │ ${singleImp.padStart(10)} │ ${singleDD.padStart(7)} │ ${bestStr.padStart(10)} │ ${tierStr.padStart(6)} │`);
+    console.log(`  │ ${padEndDisplay(nameLines[0], nameCol - 2)} │ ${String(r.tradingDays).padStart(5)} │ ${eodRet.padStart(7)} │ ${eodDD.padStart(7)} │ ${dualTime.padStart(9)} │ ${dualImp.padStart(8)} │ ${dualDD.padStart(7)} │ ${singleTime.padStart(11)} │ ${singleImp.padStart(10)} │ ${singleDD.padStart(7)} │ ${bestStr.padStart(10)} │ ${scoreStr.padStart(6)} │`);
 
     // Additional name lines
     for (let i = 1; i < nameLines.length; i++) {
@@ -6661,7 +6500,7 @@ module.exports = {
   computeWalkforward,
   deriveDailyReturns,
   selectBestTime,
-  computeRobustnessTier,
+  getCompositeQuality,
   runDualVsEodBacktestDaily,
   runSingleVsEodBacktestDaily,
   getLiveSymphonyHoldings,

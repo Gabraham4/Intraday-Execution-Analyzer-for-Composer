@@ -246,26 +246,12 @@ function buildReportHTML(r, mode) {
       body += buildWalkforwardSection(r.walkforward, wfLabel);
     }
 
-    // Hint to run combined for tier assessment
+    // Hint to run combined for full composite analysis
     if (r.bestImprovement > 0) {
-      body += '<div class="rec-keep" style="margin-top:12px;font-size:12px;opacity:0.8">Run <strong>combined</strong> mode with walk-forward for a full robustness tier assessment (peak shape + dual/single agreement + WF validation)</div>';
+      body += '<div class="rec-keep" style="margin-top:12px;font-size:12px;opacity:0.8">Run <strong>combined</strong> mode with walk-forward for full composite scoring (Return + DD + Neighbors + WF)</div>';
     }
 
   } else if (mode === 'combined') {
-    // Robustness Tier badge
-    if (analyzer.computeRobustnessTier) {
-      var tier = analyzer.computeRobustnessTier(r, testTimes);
-      var tierBg = { 1: 'rgba(63,185,80,0.15)', 2: 'rgba(88,166,255,0.15)', 3: 'rgba(210,153,34,0.15)', 4: 'rgba(248,81,73,0.15)' };
-      var tierBorder = { 1: 'rgba(63,185,80,0.4)', 2: 'rgba(88,166,255,0.4)', 3: 'rgba(210,153,34,0.4)', 4: 'rgba(248,81,73,0.4)' };
-      var tierColor = { 1: '#3fb950', 2: '#58a6ff', 3: '#d29922', 4: '#f85149' };
-      body += '<div class="section" style="background:' + tierBg[tier.tier] + ';border:1px solid ' + tierBorder[tier.tier] + ';border-radius:8px;padding:16px">';
-      body += '<div style="font-size:18px;font-weight:700;color:' + tierColor[tier.tier] + '">T' + tier.tier + ' \u2014 ' + tier.tierLabel + ' <span style="font-size:14px;font-weight:400;opacity:0.8">(score ' + tier.totalScore + '/9)</span></div>';
-      body += '<div style="margin-top:8px;font-size:13px;color:#e6edf3">';
-      body += 'Peak Shape: <strong>' + tier.peak.label + '</strong> (' + tier.peak.score + '/3) \u2014 ' + esc(tier.peak.detail);
-      body += ' &nbsp;\u00B7&nbsp; Dual/Single: <strong>' + tier.agreement.label + '</strong> (' + tier.agreement.score + '/3) \u2014 ' + esc(tier.agreement.detail);
-      body += ' &nbsp;\u00B7&nbsp; Walk-Forward: <strong>' + tier.walkforward.label + '</strong> (' + tier.walkforward.score + '/3) \u2014 ' + esc(tier.walkforward.detail);
-      body += '</div></div>';
-    }
 
     // Summary: best of each mode
     body += '<div class="section">';
@@ -339,9 +325,41 @@ function buildReportHTML(r, mode) {
       body += '</div>';
     }
 
-    // Combined recommendation — use composite scores + relative improvement
+    // Composite score boxes with quality labels — two side by side
     var dualCS = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
     var singleCS = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
+    var getQL = analyzer.getCompositeQuality || function(s) {
+      if (s >= 75) return { label: 'STRONG', htmlColor: '#3fb950', bgColor: 'rgba(63,185,80,0.12)', borderColor: 'rgba(63,185,80,0.3)' };
+      if (s >= 55) return { label: 'GOOD', htmlColor: '#58a6ff', bgColor: 'rgba(88,166,255,0.12)', borderColor: 'rgba(88,166,255,0.3)' };
+      if (s >= 40) return { label: 'MARGINAL', htmlColor: '#d29922', bgColor: 'rgba(210,153,34,0.12)', borderColor: 'rgba(210,153,34,0.3)' };
+      return { label: 'WEAK', htmlColor: '#f85149', bgColor: 'rgba(248,81,73,0.12)', borderColor: 'rgba(248,81,73,0.3)' };
+    };
+    if (dualCS || singleCS) {
+      body += '<div style="display:flex;gap:8px;margin-bottom:10px">';
+      if (dualCS) {
+        var dq = getQL(dualCS.total);
+        body += '<div style="flex:1;padding:10px 12px;border-radius:6px;background:' + dq.bgColor + ';border:1px solid ' + dq.borderColor + ';line-height:1.6">';
+        body += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Dual @ ' + r.dual.bestTime + '</div>';
+        body += '<span style="font-size:20px;font-weight:700;color:' + dq.htmlColor + '">' + dq.label + ' ' + dualCS.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
+        body += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
+        body += 'Return ' + dualCS.returnScore + ' &middot; DD ' + dualCS.ddScore + ' &middot; Neighbors ' + dualCS.neighborScore;
+        if (dualCS.wfScore !== null) body += ' &middot; WF ' + dualCS.wfScore;
+        body += '</div></div>';
+      }
+      if (singleCS) {
+        var sq = getQL(singleCS.total);
+        body += '<div style="flex:1;padding:10px 12px;border-radius:6px;background:' + sq.bgColor + ';border:1px solid ' + sq.borderColor + ';line-height:1.6">';
+        body += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Single @ ' + r.single.bestTime + '</div>';
+        body += '<span style="font-size:20px;font-weight:700;color:' + sq.htmlColor + '">' + sq.label + ' ' + singleCS.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
+        body += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
+        body += 'Return ' + singleCS.returnScore + ' &middot; DD ' + singleCS.ddScore + ' &middot; Neighbors ' + singleCS.neighborScore;
+        if (singleCS.wfScore !== null) body += ' &middot; WF ' + singleCS.wfScore;
+        body += '</div></div>';
+      }
+      body += '</div>';
+    }
+
+    // Recommendation line
     var dualTotal = dualCS ? dualCS.total : 0;
     var singleTotal = singleCS ? singleCS.total : 0;
     var eodAbs = Math.abs(r.eod.cumReturn);
@@ -356,32 +374,16 @@ function buildReportHTML(r, mode) {
     } else if (dualViable) { bestMode = 'Dual'; bestScore = dualTotal; bestImp = r.dual.improvement; bestRel = dualRelPct; }
     else if (singleViable) { bestMode = 'Single'; bestScore = singleTotal; bestImp = r.single.improvement; bestRel = singleRelPct; }
     else { bestMode = null; bestScore = 0; bestImp = 0; bestRel = 0; }
-    var cRecClass = bestMode && bestScore >= 60 ? 'rec-add' : !bestMode ? 'rec-warn' : 'rec-keep';
+    var cRecClass = bestMode && bestScore >= 55 ? 'rec-add' : !bestMode ? 'rec-warn' : 'rec-keep';
     var cRecText;
     if (!bestMode) {
       cRecText = 'NOT RECOMMENDED \u2014 Improvement too small relative to EOD returns';
-    } else if (bestScore >= 60) {
-      cRecText = 'USE ' + bestMode.toUpperCase() + ' @ ' + (bestMode === 'Dual' ? r.dual.bestTime : r.single.bestTime) + ' (score ' + bestScore + '/100, ' + pct(bestImp, 1) + ', ' + (bestRel >= 0 ? '+' : '') + bestRel.toFixed(0) + '% relative)';
+    } else if (bestScore >= 55) {
+      cRecText = 'USE ' + bestMode.toUpperCase() + ' @ ' + (bestMode === 'Dual' ? r.dual.bestTime : r.single.bestTime) + ' (' + pct(bestImp, 1) + ', ' + (bestRel >= 0 ? '+' : '') + bestRel.toFixed(0) + '% relative)';
     } else {
-      cRecText = bestMode + ' mode marginal (score ' + bestScore + '/100, ' + pct(bestImp, 1) + ', ' + (bestRel >= 0 ? '+' : '') + bestRel.toFixed(0) + '% relative)';
+      cRecText = bestMode + ' mode marginal (' + pct(bestImp, 1) + ', ' + (bestRel >= 0 ? '+' : '') + bestRel.toFixed(0) + '% relative) \u2014 proceed with caution';
     }
     body += '<div class="' + cRecClass + '">' + cRecText + '</div>';
-
-    // Composite score breakdowns
-    var cParts = [];
-    if (r.dual && r.dual.compositeScores && r.dual.bestTime && r.dual.compositeScores[r.dual.bestTime]) {
-      var dcs = r.dual.compositeScores[r.dual.bestTime];
-      var dwfP = dcs.wfScore !== null ? ' &middot; WF ' + dcs.wfScore : '';
-      cParts.push('Dual @ ' + r.dual.bestTime + ': <strong>' + dcs.total + '/100</strong> (Ret ' + dcs.returnScore + ', DD ' + dcs.ddScore + ', Nbr ' + dcs.neighborScore + dwfP + ')');
-    }
-    if (r.single && r.single.compositeScores && r.single.bestTime && r.single.compositeScores[r.single.bestTime]) {
-      var scs = r.single.compositeScores[r.single.bestTime];
-      var swfP = scs.wfScore !== null ? ' &middot; WF ' + scs.wfScore : '';
-      cParts.push('Single @ ' + r.single.bestTime + ': <strong>' + scs.total + '/100</strong> (Ret ' + scs.returnScore + ', DD ' + scs.ddScore + ', Nbr ' + scs.neighborScore + swfP + ')');
-    }
-    if (cParts.length > 0) {
-      body += '<div class="meta" style="margin-top:6px;font-size:12px">' + cParts.join(' &nbsp;|&nbsp; ') + '</div>';
-    }
 
     // Walk-forward for combined
     if (r.dual && r.dual.walkforward) {
@@ -580,9 +582,6 @@ async function handleRequest(req, res) {
             sseSend(res, 'progress', { current: i + 1, total: ids.length, id: ids[i], phase: 'combined' });
             const results = await analyzer.combinedAnalysis([ids[i]], intradayDays, true);
             const r = results[0];
-            if (r && !r.error && analyzer.computeRobustnessTier) {
-              r.tier = analyzer.computeRobustnessTier(r, analyzer.CONFIG.TEST_TIMES);
-            }
             if (r) {
               sseSend(res, 'result', r);
               saveReport(r, 'combined');
@@ -1693,19 +1692,29 @@ function renderCombinedSummaryTable(results) {
     { key: 'singleTime', label: 'Single Best', cls: 'num' },
     { key: 'singleRet', label: 'Single Return', cls: 'num' },
     { key: 'singleImp', label: 'Single +/-', cls: 'num' },
-    { key: 'tierScore', label: 'Tier', cls: 'num' },
+    { key: 'topScore', label: 'Score', cls: 'num' },
   ];
+
+  var getQL = function(s) {
+    if (s >= 75) return { label: 'STRONG', color: '#3fb950' };
+    if (s >= 55) return { label: 'GOOD', color: '#58a6ff' };
+    if (s >= 40) return { label: 'MARGINAL', color: '#d29922' };
+    return { label: 'WEAK', color: '#f85149' };
+  };
 
   var rows = results.map(function(r) {
     var eod = r.eod.cumReturn;
     var dualRelImp = eod !== 0 ? (r.dual.improvement / Math.abs(eod)) * 100 : 0;
     var singleRelImp = eod !== 0 ? (r.single.improvement / Math.abs(eod)) * 100 : 0;
+    var dcs = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
+    var scs = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
+    var ts = Math.max(dcs ? dcs.total : 0, scs ? scs.total : 0);
     return {
       id: r.id, name: r.name, from: fmtStartDate(r.dateRange), days: r.tradingDays,
       dateRange: r.dateRange, eod: eod,
       dualTime: r.dual.bestTime, dualRet: r.dual.bestReturn, dualImp: r.dual.improvement, dualRelImp: dualRelImp,
       singleTime: r.single.bestTime, singleRet: r.single.bestReturn, singleImp: r.single.improvement, singleRelImp: singleRelImp,
-      tier: r.tier || null, tierScore: r.tier ? r.tier.totalScore : -1,
+      topScore: ts,
     };
   });
 
@@ -1737,10 +1746,9 @@ function renderCombinedSummaryTable(results) {
     html += '<td class="num">' + r.singleTime + '</td>';
     html += '<td class="num ' + valClass(r.singleRet) + '">' + fmtPct(r.singleRet, 0) + '</td>';
     html += '<td class="num ' + valClass(r.singleImp) + '">' + fmtPct(r.singleImp, 0) + '<br><span style="opacity:0.5;font-size:0.8em">(' + fmtPct(r.singleRelImp, 0) + ' rel)</span></td>';
-    if (r.tier) {
-      var tColors = { 1: '#3fb950', 2: '#58a6ff', 3: '#d29922', 4: '#f85149' };
-      var tColor = tColors[r.tier.tier] || '#8b949e';
-      html += '<td class="num" style="font-weight:700;color:' + tColor + '">T' + r.tier.tier + '<br><span style="opacity:0.5;font-size:0.8em;font-weight:400">(' + r.tier.totalScore + '/9)</span></td>';
+    if (r.topScore > 0) {
+      var ql = getQL(r.topScore);
+      html += '<td class="num" style="font-weight:700;color:' + ql.color + '">' + r.topScore + '<br><span style="opacity:0.5;font-size:0.8em;font-weight:400">' + ql.label + '</span></td>';
     } else {
       html += '<td class="num">-</td>';
     }
@@ -1878,55 +1886,32 @@ function renderCombinedDetailCard(r) {
   html += ' | Max DD: <span class="neg">' + r.eod.maxDD.toFixed(1) + '%</span>';
   html += '</div>';
 
-  // Robustness Tier badge (uses pre-computed r.tier from SSE handler)
-  if (r.tier) {
-    var tier = r.tier;
-    var tBg = { 1: 'rgba(63,185,80,0.12)', 2: 'rgba(88,166,255,0.12)', 3: 'rgba(210,153,34,0.12)', 4: 'rgba(248,81,73,0.12)' };
-    var tBd = { 1: 'rgba(63,185,80,0.3)', 2: 'rgba(88,166,255,0.3)', 3: 'rgba(210,153,34,0.3)', 4: 'rgba(248,81,73,0.3)' };
-    var tCl = { 1: '#3fb950', 2: '#58a6ff', 3: '#d29922', 4: '#f85149' };
-    html += '<div style="margin-bottom:10px;padding:10px 12px;border-radius:6px;background:' + tBg[tier.tier] + ';border:1px solid ' + tBd[tier.tier] + '">';
-    html += '<span style="font-weight:700;color:' + tCl[tier.tier] + '">T' + tier.tier + ' ' + tier.tierLabel + '</span>';
-    html += ' <span style="font-size:12px;opacity:0.7">(' + tier.totalScore + '/9)</span>';
-    html += ' <span style="font-size:11px;margin-left:8px">';
-    html += 'Peak: ' + tier.peak.score + '/3';
-    html += ' \\u00B7 Agreement: ' + tier.agreement.score + '/3';
-    html += ' \\u00B7 WF: ' + tier.walkforward.score + '/3';
-    html += '</span>';
-    html += '<div style="margin-top:6px;font-size:11px;color:var(--text2,#8b949e);line-height:1.6">';
-    html += '<div><strong>Peak Shape:</strong> ' + escapeHtml(tier.peak.label) + ' (' + tier.peak.score + '/3) \\u2014 ' + escapeHtml(tier.peak.detail) + '</div>';
-    html += '<div><strong>Dual/Single:</strong> ' + escapeHtml(tier.agreement.label) + ' (' + tier.agreement.score + '/3) \\u2014 ' + escapeHtml(tier.agreement.detail) + '</div>';
-    html += '<div><strong>Walk-Forward:</strong> ' + escapeHtml(tier.walkforward.label) + ' (' + tier.walkforward.score + '/3) \\u2014 ' + escapeHtml(tier.walkforward.detail) + '</div>';
-    html += '</div>';
-    html += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid ' + tBd[tier.tier] + ';font-size:10px;opacity:0.5">';
-    html += '<span style="color:#3fb950">T1 Robust (7-9)</span> \\u00B7 ';
-    html += '<span style="color:#58a6ff">T2 Promising (5-6)</span> \\u00B7 ';
-    html += '<span style="color:#d29922">T3 Speculative (3-4)</span> \\u00B7 ';
-    html += '<span style="color:#f85149">T4 Avoid (0-2)</span>';
-    html += '</div></div>';
-  }
-
-  // Composite score breakdowns — two side-by-side boxes
+  // Composite score boxes with quality labels
   var dcsData = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
   var scsData = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
+  var getQL2 = function(s) {
+    if (s >= 75) return { label: 'STRONG', htmlColor: '#3fb950', bgColor: 'rgba(63,185,80,0.12)', borderColor: 'rgba(63,185,80,0.3)' };
+    if (s >= 55) return { label: 'GOOD', htmlColor: '#58a6ff', bgColor: 'rgba(88,166,255,0.12)', borderColor: 'rgba(88,166,255,0.3)' };
+    if (s >= 40) return { label: 'MARGINAL', htmlColor: '#d29922', bgColor: 'rgba(210,153,34,0.12)', borderColor: 'rgba(210,153,34,0.3)' };
+    return { label: 'WEAK', htmlColor: '#f85149', bgColor: 'rgba(248,81,73,0.12)', borderColor: 'rgba(248,81,73,0.3)' };
+  };
   if (dcsData || scsData) {
     html += '<div style="display:flex;gap:8px;margin-bottom:10px">';
     if (dcsData) {
-      var dBorder = dcsData.total >= 60 ? 'rgba(63,185,80,0.3)' : dcsData.total >= 40 ? 'rgba(88,166,255,0.3)' : 'rgba(210,153,34,0.3)';
-      var dColor = dcsData.total >= 60 ? '#3fb950' : dcsData.total >= 40 ? '#58a6ff' : '#d29922';
-      html += '<div style="flex:1;padding:8px 10px;border-radius:5px;background:rgba(136,136,136,0.08);border:1px solid ' + dBorder + ';font-size:12px;line-height:1.6">';
+      var dq2 = getQL2(dcsData.total);
+      html += '<div style="flex:1;padding:10px 12px;border-radius:6px;background:' + dq2.bgColor + ';border:1px solid ' + dq2.borderColor + ';line-height:1.6">';
       html += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Dual @ ' + r.dual.bestTime + '</div>';
-      html += '<span style="font-size:18px;font-weight:700;color:' + dColor + '">' + dcsData.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
+      html += '<span style="font-size:20px;font-weight:700;color:' + dq2.htmlColor + '">' + dq2.label + ' ' + dcsData.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
       html += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
       html += 'Return ' + dcsData.returnScore + ' \\u00B7 DD ' + dcsData.ddScore + ' \\u00B7 Neighbors ' + dcsData.neighborScore;
       if (dcsData.wfScore !== null) html += ' \\u00B7 WF ' + dcsData.wfScore;
       html += '</div></div>';
     }
     if (scsData) {
-      var sBorder = scsData.total >= 60 ? 'rgba(63,185,80,0.3)' : scsData.total >= 40 ? 'rgba(88,166,255,0.3)' : 'rgba(210,153,34,0.3)';
-      var sColor = scsData.total >= 60 ? '#3fb950' : scsData.total >= 40 ? '#58a6ff' : '#d29922';
-      html += '<div style="flex:1;padding:8px 10px;border-radius:5px;background:rgba(136,136,136,0.08);border:1px solid ' + sBorder + ';font-size:12px;line-height:1.6">';
+      var sq2 = getQL2(scsData.total);
+      html += '<div style="flex:1;padding:10px 12px;border-radius:6px;background:' + sq2.bgColor + ';border:1px solid ' + sq2.borderColor + ';line-height:1.6">';
       html += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Single @ ' + r.single.bestTime + '</div>';
-      html += '<span style="font-size:18px;font-weight:700;color:' + sColor + '">' + scsData.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
+      html += '<span style="font-size:20px;font-weight:700;color:' + sq2.htmlColor + '">' + sq2.label + ' ' + scsData.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
       html += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
       html += 'Return ' + scsData.returnScore + ' \\u00B7 DD ' + scsData.ddScore + ' \\u00B7 Neighbors ' + scsData.neighborScore;
       if (scsData.wfScore !== null) html += ' \\u00B7 WF ' + scsData.wfScore;
@@ -1935,7 +1920,7 @@ function renderCombinedDetailCard(r) {
     html += '</div>';
   }
 
-  // Recommendation — up top for immediate visibility
+  // Recommendation
   var eodAbs2 = Math.abs(r.eod.cumReturn);
   var dRelPct = eodAbs2 > 1 ? (r.dual.improvement / eodAbs2) * 100 : r.dual.improvement * 10;
   var sRelPct = eodAbs2 > 1 ? (r.single.improvement / eodAbs2) * 100 : r.single.improvement * 10;
@@ -1950,14 +1935,14 @@ function renderCombinedDetailCard(r) {
   } else if (dv2) { bm2 = 'Dual'; bs2 = dualCS2; bi2 = r.dual.improvement; br2 = dRelPct; }
   else if (sv2) { bm2 = 'Single'; bs2 = singleCS2; bi2 = r.single.improvement; br2 = sRelPct; }
   else { bm2 = null; bs2 = 0; bi2 = 0; br2 = 0; }
-  var recClass = bm2 && bs2 >= 60 ? 'add' : !bm2 ? 'warning' : 'keep';
+  var recClass = bm2 && bs2 >= 55 ? 'add' : !bm2 ? 'warning' : 'keep';
   var recText;
   if (!bm2) {
     recText = 'NOT RECOMMENDED - Improvement too small relative to EOD returns';
-  } else if (bs2 >= 60) {
-    recText = 'USE ' + bm2.toUpperCase() + ' @ ' + (bm2 === 'Dual' ? r.dual.bestTime : r.single.bestTime) + ' (score ' + bs2 + '/100, ' + fmtPct(bi2, 1) + ', +' + br2.toFixed(0) + '% relative)';
+  } else if (bs2 >= 55) {
+    recText = 'USE ' + bm2.toUpperCase() + ' @ ' + (bm2 === 'Dual' ? r.dual.bestTime : r.single.bestTime) + ' (' + fmtPct(bi2, 1) + ', +' + br2.toFixed(0) + '% relative)';
   } else {
-    recText = bm2 + ' mode marginal (score ' + bs2 + '/100, ' + fmtPct(bi2, 1) + ', +' + br2.toFixed(0) + '% relative)';
+    recText = bm2 + ' mode marginal (' + fmtPct(bi2, 1) + ', +' + br2.toFixed(0) + '% relative) \\u2014 proceed with caution';
   }
   html += '<div class="recommendation ' + recClass + '">' + recText + '</div>';
 
