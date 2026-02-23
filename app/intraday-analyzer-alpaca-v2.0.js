@@ -3855,16 +3855,10 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
       const _tWF = Date.now();
       const _shortName = name.length > 30 ? name.slice(0, 27) + '...' : name;
       console.log(`  [SINGLE] ${_shortName} — ${CONFIG.TEST_TIMES.length} backtests ${((_tBacktest - _tStart)/1000).toFixed(1)}s, scoring+WF ${((_tWF - _tBacktest)/1000).toFixed(1)}s, total ${((_tWF - _tStart)/1000).toFixed(1)}s`);
-      let bestTime = selection.bestTime;
-      let bestImprovement = selection.bestImprovement;
+      const bestTime = selection.bestTime;
+      const bestImprovement = selection.bestImprovement;
 
-      // EOD fallback: if no improvement, stick with EOD
-      if (bestImprovement <= 0) {
-        bestTime = CONFIG.EOD_TIME;
-        bestImprovement = 0;
-      }
-
-      let walkforward = (bestTime && bestTime !== CONFIG.EOD_TIME) ? (selection.walkforwardResults[bestTime] || null) : null;
+      let walkforward = selection.walkforwardResults[bestTime] || null;
 
       // Strip equityCurves before storing in results
       for (const t of CONFIG.TEST_TIMES) if (timeResults[t]) delete timeResults[t].equityCurve;
@@ -4301,8 +4295,8 @@ async function combinedAnalysis(ids, intradayDays, quiet = false) {
       },
       single: {
         bestTime: single.bestTime,
-        bestReturn: single.bestTime === CONFIG.EOD_TIME ? single.eod.cumReturn : single.times[single.bestTime].cumReturn,
-        bestDD: single.bestTime === CONFIG.EOD_TIME ? single.eod.maxDD : single.times[single.bestTime].maxDD,
+        bestReturn: single.times[single.bestTime] ? single.times[single.bestTime].cumReturn : single.eod.cumReturn,
+        bestDD: single.times[single.bestTime] ? single.times[single.bestTime].maxDD : single.eod.maxDD,
         improvement: single.bestImprovement,
         recommendation: single.recommendation,
         times: single.times,
