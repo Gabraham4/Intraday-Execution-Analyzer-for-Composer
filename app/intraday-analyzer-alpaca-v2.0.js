@@ -3740,7 +3740,7 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
       const selection = selectBestTime(timeResults, eodResult, tradingDays,
         CONFIG.TEST_TIMES, CONFIG.walkforward, CONFIG.wfWindowSize, CONFIG.wfStepSize);
       const _tWF = Date.now();
-      if (!quiet) console.log(`  Timing: ${CONFIG.TEST_TIMES.length} backtests ${((_tBacktest - _tStart)/1000).toFixed(1)}s, scoring+WF ${((_tWF - _tBacktest)/1000).toFixed(1)}s, total ${((_tWF - _tStart)/1000).toFixed(1)}s`);
+      console.log(`  Timing: ${CONFIG.TEST_TIMES.length} backtests ${((_tBacktest - _tStart)/1000).toFixed(1)}s, scoring+WF ${((_tWF - _tBacktest)/1000).toFixed(1)}s, total ${((_tWF - _tStart)/1000).toFixed(1)}s`);
       const bestTime = selection.bestTime;
       const bestImprovement = selection.bestImprovement;
       let walkforward = selection.walkforwardResults[bestTime] || null;
@@ -3852,7 +3852,7 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
       const selection = selectBestTime(timeResults, eodResult, tradingDays,
         CONFIG.TEST_TIMES, CONFIG.walkforward, CONFIG.wfWindowSize, CONFIG.wfStepSize);
       const _tWF = Date.now();
-      if (!quiet) console.log(`  Timing: ${CONFIG.TEST_TIMES.length} backtests ${((_tBacktest - _tStart)/1000).toFixed(1)}s, scoring+WF ${((_tWF - _tBacktest)/1000).toFixed(1)}s, total ${((_tWF - _tStart)/1000).toFixed(1)}s`);
+      console.log(`  Timing: ${CONFIG.TEST_TIMES.length} backtests ${((_tBacktest - _tStart)/1000).toFixed(1)}s, scoring+WF ${((_tWF - _tBacktest)/1000).toFixed(1)}s, total ${((_tWF - _tStart)/1000).toFixed(1)}s`);
       let bestTime = selection.bestTime;
       const bestImprovement = selection.bestImprovement;
 
