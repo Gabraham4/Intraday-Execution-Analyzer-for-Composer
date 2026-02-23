@@ -3854,10 +3854,13 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
       const _tWF = Date.now();
       console.log(`  Timing: ${CONFIG.TEST_TIMES.length} backtests ${((_tBacktest - _tStart)/1000).toFixed(1)}s, scoring+WF ${((_tWF - _tBacktest)/1000).toFixed(1)}s, total ${((_tWF - _tStart)/1000).toFixed(1)}s`);
       let bestTime = selection.bestTime;
-      const bestImprovement = selection.bestImprovement;
+      let bestImprovement = selection.bestImprovement;
 
       // EOD fallback: if no improvement, stick with EOD
-      if (bestImprovement <= 0) bestTime = CONFIG.EOD_TIME;
+      if (bestImprovement <= 0) {
+        bestTime = CONFIG.EOD_TIME;
+        bestImprovement = 0;
+      }
 
       let walkforward = (bestTime && bestTime !== CONFIG.EOD_TIME) ? (selection.walkforwardResults[bestTime] || null) : null;
 
