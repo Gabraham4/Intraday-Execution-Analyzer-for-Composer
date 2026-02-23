@@ -102,7 +102,7 @@ function sseSend(res, event, data) {
 // REPORT SAVING
 // ============================================================================
 
-const REPORTS_DIR = path.join(APP_DIR, 'reports');
+const REPORTS_DIR = path.join(APP_DIR, '..', 'reports');
 
 function sanitizeFilename(name) {
   return name.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, ' ').trim();

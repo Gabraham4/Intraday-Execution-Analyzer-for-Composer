@@ -1,6 +1,6 @@
 {
   "name": "intraday-execution-analyzer",
-  "version": "2.0.0",
+  "version": "2.1.1",
   "description": "Analyze optimal intraday execution times for Composer.trade strategies",
   "main": "app/gui-server.js",
   "scripts": {
