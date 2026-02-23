@@ -116,7 +116,10 @@ function saveReport(result, mode) {
     const eod = (analyzer.CONFIG && analyzer.CONFIG.EOD_TIME) || '15:45';
     const tf = (analyzer.CONFIG && analyzer.CONFIG.ALPACA_TIMEFRAME) || '15Min';
     const wf = (analyzer.CONFIG && analyzer.CONFIG.walkforward) ? 'wf' : 'nowf';
-    const settings = tf + ' ' + eod.replace(':', '') + ' ' + wf;
+    const ds = analyzer.CONFIG.dateStart || '';
+    const de = analyzer.CONFIG.dateEnd || '';
+    const datePart = (ds || de) ? ' ' + (ds || 'start') + '_' + (de || 'end') : '';
+    const settings = tf + ' ' + eod.replace(':', '') + ' ' + wf + datePart;
     const filename = sanitizeFilename(result.name) + ' (' + mode + ') ' + settings + '.html';
     const html = buildReportHTML(result, mode);
     fs.writeFileSync(path.join(REPORTS_DIR, filename), html);
