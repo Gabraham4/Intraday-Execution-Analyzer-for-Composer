@@ -3742,6 +3742,7 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
       const bestTime = selection.bestTime;
       const bestImprovement = selection.bestImprovement;
       let walkforward = selection.walkforwardResults[bestTime] || null;
+      const allWalkforwardResults = selection.walkforwardResults || {};
 
       // Strip equityCurves before storing in results
       for (const t of CONFIG.TEST_TIMES) if (timeResults[t]) delete timeResults[t].equityCurve;
@@ -3769,6 +3770,7 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
           return 'MARGINAL';
         })(),
         walkforward,
+        allWalkforwardResults,
         compositeScores: selection.compositeScores,
         selectionMethod: selection.selectionMethod
       });
@@ -3856,6 +3858,7 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
       const bestImprovement = selection.bestImprovement;
 
       let walkforward = selection.walkforwardResults[bestTime] || null;
+      const allWalkforwardResults = selection.walkforwardResults || {};
 
       // Strip equityCurves before storing in results
       for (const t of CONFIG.TEST_TIMES) if (timeResults[t]) delete timeResults[t].equityCurve;
@@ -3881,6 +3884,7 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
           return 'KEEP_EOD';
         })(),
         walkforward,
+        allWalkforwardResults,
         compositeScores: selection.compositeScores,
         selectionMethod: selection.selectionMethod
       });
@@ -4287,6 +4291,7 @@ async function combinedAnalysis(ids, intradayDays, quiet = false) {
         recommendation: dual.recommendation,
         times: dual.times,
         walkforward: dual.walkforward || null,
+        allWalkforwardResults: dual.allWalkforwardResults || {},
         compositeScores: dual.compositeScores || null,
         selectionMethod: dual.selectionMethod || null
       },
@@ -4298,6 +4303,7 @@ async function combinedAnalysis(ids, intradayDays, quiet = false) {
         recommendation: single.recommendation,
         times: single.times,
         walkforward: single.walkforward || null,
+        allWalkforwardResults: single.allWalkforwardResults || {},
         compositeScores: single.compositeScores || null,
         selectionMethod: single.selectionMethod || null
       }

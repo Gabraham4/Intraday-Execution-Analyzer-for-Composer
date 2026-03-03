@@ -154,11 +154,9 @@ function buildReportHTML(r, mode) {
     return parts.length === 2 ? fDate(parts[0]) + ' \u2014 ' + fDate(parts[1]) : dr;
   }
 
-  function buildWalkforwardSection(wf, altLabel) {
-    if (!wf || !wf.summary || wf.summary.verdict === 'INSUFFICIENT_DATA') return '';
+  function buildSingleWfPanel(wf, altLabel) {
     var s = wf.summary;
-    var h = '<div class="section">';
-    h += '<div class="section-title">Walk-Forward Consistency \u2014 ' + esc(altLabel) + ' (' + s.total + ' windows)</div>';
+    var h = '';
     h += '<table><thead><tr><th>Period</th><th>EOD</th><th>' + esc(altLabel) + '</th><th>Alpha</th></tr></thead><tbody>';
     for (var wi = 0; wi < wf.windows.length; wi++) {
       var w = wf.windows[wi];
@@ -177,6 +175,68 @@ function buildReportHTML(r, mode) {
     h += ' | Avg alpha: ' + pct(s.avgAlpha, 2);
     if (s.total >= 3) h += ' | Recent: ' + s.recentWins + '/' + Math.min(3, s.total) + ' wins';
     h += '<div style="margin-top:4px;font-size:12px;opacity:0.7">' + vDesc + '</div></div>';
+    return h;
+  }
+
+  function buildWalkforwardSection(wf, altLabel, allWfResults, bestTime, compositeScores) {
+    if (!wf || !wf.summary || wf.summary.verdict === 'INSUFFICIENT_DATA') return '';
+
+    // Collect times that have valid WF data
+    var wfTimes = [];
+    if (allWfResults && typeof allWfResults === 'object') {
+      var sortedKeys = Object.keys(allWfResults).sort();
+      for (var ki = 0; ki < sortedKeys.length; ki++) {
+        var t = sortedKeys[ki];
+        var twf = allWfResults[t];
+        if (twf && twf.summary && twf.summary.verdict !== 'INSUFFICIENT_DATA') {
+          wfTimes.push(t);
+        }
+      }
+    }
+    var hasTabs = wfTimes.length > 1;
+    var uid = 'wf_' + Math.random().toString(36).slice(2, 8);
+
+    var h = '<div class="section">';
+    h += '<div class="section-title">Walk-Forward Consistency</div>';
+
+    if (hasTabs) {
+      // Tab bar
+      h += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px">';
+      for (var ti = 0; ti < wfTimes.length; ti++) {
+        var t = wfTimes[ti];
+        var twf = allWfResults[t];
+        var isBest = t === bestTime;
+        var vDot = twf.summary.verdict === 'CONSISTENT' ? '#3fb950' : twf.summary.verdict === 'EPISODIC' ? '#d29922' : '#f85149';
+        var cs = compositeScores && compositeScores[t];
+        var wfScoreLabel = cs && cs.wfScore !== null ? ' (' + cs.wfScore + ')' : '';
+        var activeStyle = isBest
+          ? 'background:#58a6ff;color:#0d1117;font-weight:600'
+          : 'background:#21262d;color:#8b949e';
+        h += '<button class="wf-tab" data-uid="' + uid + '" data-time="' + t + '" '
+          + 'style="border:1px solid #30363d;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;'
+          + activeStyle + '" '
+          + 'onclick="switchWfTab(this,\'' + uid + '\',\'' + t + '\')">'
+          + '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:' + vDot + ';margin-right:4px;vertical-align:middle"></span>'
+          + t + (isBest ? ' BEST' : '') + wfScoreLabel
+          + '</button>';
+      }
+      h += '</div>';
+
+      // Panels for each time
+      for (var ti = 0; ti < wfTimes.length; ti++) {
+        var t = wfTimes[ti];
+        var twf = allWfResults[t];
+        var isBest = t === bestTime;
+        var tabAltLabel = '@' + t;
+        h += '<div class="wf-panel" data-uid="' + uid + '" data-time="' + t + '" style="' + (isBest ? '' : 'display:none') + '">';
+        h += buildSingleWfPanel(twf, tabAltLabel);
+        h += '</div>';
+      }
+    } else {
+      // Single time — render directly
+      h += buildSingleWfPanel(wf, altLabel);
+    }
+
     h += '</div>';
     return h;
   }
@@ -243,7 +303,7 @@ function buildReportHTML(r, mode) {
     // Walk-forward
     if (r.walkforward) {
       var wfLabel = mode === 'dual' ? 'Dual' : '@' + r.bestTime;
-      body += buildWalkforwardSection(r.walkforward, wfLabel);
+      body += buildWalkforwardSection(r.walkforward, wfLabel, r.allWalkforwardResults, r.bestTime, r.compositeScores);
     }
 
     // Hint to run combined for full composite analysis
@@ -383,10 +443,10 @@ function buildReportHTML(r, mode) {
 
     // Walk-forward for combined
     if (r.dual && r.dual.walkforward) {
-      body += buildWalkforwardSection(r.dual.walkforward, 'Dual @' + r.dual.bestTime);
+      body += buildWalkforwardSection(r.dual.walkforward, 'Dual @' + r.dual.bestTime, r.dual.allWalkforwardResults, r.dual.bestTime, r.dual.compositeScores);
     }
     if (r.single && r.single.walkforward) {
-      body += buildWalkforwardSection(r.single.walkforward, 'Single @' + r.single.bestTime);
+      body += buildWalkforwardSection(r.single.walkforward, 'Single @' + r.single.bestTime, r.single.allWalkforwardResults, r.single.bestTime, r.single.compositeScores);
     }
   }
 
@@ -416,6 +476,22 @@ function buildReportHTML(r, mode) {
     + '</style>\n</head><body>\n'
     + body
     + '\n<div class="footer">Intraday Execution Analyzer &nbsp;\u00B7&nbsp; Generated ' + esc(runDate) + '</div>\n'
+    + '<script>\n'
+    + 'function switchWfTab(btn, uid, time) {\n'
+    + '  var tabs = document.querySelectorAll(\'.wf-tab[data-uid="\' + uid + \'"]\');\n'
+    + '  for (var i = 0; i < tabs.length; i++) {\n'
+    + '    if (tabs[i].getAttribute("data-time") === time) {\n'
+    + '      tabs[i].style.background = "#58a6ff"; tabs[i].style.color = "#0d1117"; tabs[i].style.fontWeight = "600";\n'
+    + '    } else {\n'
+    + '      tabs[i].style.background = "#21262d"; tabs[i].style.color = "#8b949e"; tabs[i].style.fontWeight = "normal";\n'
+    + '    }\n'
+    + '  }\n'
+    + '  var panels = document.querySelectorAll(\'.wf-panel[data-uid="\' + uid + \'"]\');\n'
+    + '  for (var i = 0; i < panels.length; i++) {\n'
+    + '    panels[i].style.display = panels[i].getAttribute("data-time") === time ? "" : "none";\n'
+    + '  }\n'
+    + '}\n'
+    + '</script>\n'
     + '</body></html>';
 }
 
@@ -1777,13 +1853,10 @@ function renderCombinedSummaryTable(results) {
   return html;
 }
 
-function renderWalkforwardHTML(wf, altLabel, sectionLabel) {
+function renderSingleWfPanel(wf, altLabel) {
   if (!wf || !wf.summary || wf.summary.verdict === 'INSUFFICIENT_DATA') return '';
   var s = wf.summary;
-  var heading = sectionLabel ? sectionLabel + ' Walk-Forward Consistency' : 'Walk-Forward Consistency';
-
-  var html = '<div style="margin-top:16px">';
-  html += '<div style="font-size:12px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">' + heading + ' (' + s.total + ' windows)</div>';
+  var html = '';
 
   // Windows table
   html += '<table class="detail-table"><thead><tr>';
@@ -1801,7 +1874,7 @@ function renderWalkforwardHTML(wf, altLabel, sectionLabel) {
   }
   html += '</tbody></table>';
 
-  // Summary line — just stats, no recommendation styling
+  // Summary line
   var vColor = s.verdict === 'CONSISTENT' ? '#3fb950' : s.verdict === 'EPISODIC' ? '#d29922' : '#f85149';
   html += '<div style="margin-top:8px;font-size:12px;color:var(--text2,#8b949e)">';
   html += '<span style="color:' + vColor + ';font-weight:600">' + s.verdict + '</span> \\u2014 ';
@@ -1810,8 +1883,72 @@ function renderWalkforwardHTML(wf, altLabel, sectionLabel) {
   if (s.total >= 3) {
     html += ' | Recent: ' + s.recentWins + '/' + Math.min(3, s.total) + ' wins';
   }
-  html += '</div></div>';
+  html += '</div>';
 
+  return html;
+}
+
+function renderWalkforwardHTML(wf, altLabel, sectionLabel, allWfResults, bestTime, compositeScores) {
+  if (!wf || !wf.summary || wf.summary.verdict === 'INSUFFICIENT_DATA') return '';
+  var heading = sectionLabel ? sectionLabel + ' Walk-Forward Consistency' : 'Walk-Forward Consistency';
+
+  // Collect times that have valid WF results
+  var wfTimes = [];
+  if (allWfResults && typeof allWfResults === 'object') {
+    var sortedKeys = Object.keys(allWfResults).sort();
+    for (var ki = 0; ki < sortedKeys.length; ki++) {
+      var t = sortedKeys[ki];
+      var twf = allWfResults[t];
+      if (twf && twf.summary && twf.summary.verdict !== 'INSUFFICIENT_DATA') {
+        wfTimes.push(t);
+      }
+    }
+  }
+  var hasTabs = wfTimes.length > 1;
+  var uid = 'wf_' + Math.random().toString(36).slice(2, 8);
+
+  var html = '<div style="margin-top:16px">';
+  html += '<div style="font-size:12px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">' + heading + '</div>';
+
+  // Tab bar (only if multiple times have WF data)
+  if (hasTabs) {
+    html += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px">';
+    for (var ti = 0; ti < wfTimes.length; ti++) {
+      var t = wfTimes[ti];
+      var twf = allWfResults[t];
+      var isBest = t === bestTime;
+      var vDot = twf.summary.verdict === 'CONSISTENT' ? '#3fb950' : twf.summary.verdict === 'EPISODIC' ? '#d29922' : '#f85149';
+      var cs = compositeScores && compositeScores[t];
+      var wfScoreLabel = cs && cs.wfScore !== null ? ' (' + cs.wfScore + ')' : '';
+      var activeStyle = isBest
+        ? 'background:var(--accent,#58a6ff);color:#0d1117;font-weight:600'
+        : 'background:var(--bg2,#21262d);color:var(--text2,#8b949e)';
+      html += '<button class="wf-tab" data-uid="' + uid + '" data-time="' + t + '" '
+        + 'style="border:1px solid var(--border,#30363d);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;'
+        + activeStyle + '" '
+        + 'onclick="switchWfTab(this,\\'' + uid + '\\',\\'' + t + '\\')">'
+        + '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:' + vDot + ';margin-right:4px;vertical-align:middle"></span>'
+        + t + (isBest ? ' BEST' : '') + wfScoreLabel
+        + '</button>';
+    }
+    html += '</div>';
+
+    // Render a panel for each time (hidden except best)
+    for (var ti = 0; ti < wfTimes.length; ti++) {
+      var t = wfTimes[ti];
+      var twf = allWfResults[t];
+      var isBest = t === bestTime;
+      var tabAltLabel = sectionLabel ? sectionLabel + ' @' + t : '@' + t;
+      html += '<div class="wf-panel" data-uid="' + uid + '" data-time="' + t + '" style="' + (isBest ? '' : 'display:none') + '">';
+      html += renderSingleWfPanel(twf, tabAltLabel);
+      html += '</div>';
+    }
+  } else {
+    // Single time — render directly as before
+    html += renderSingleWfPanel(wf, altLabel);
+  }
+
+  html += '</div>';
   return html;
 }
 
@@ -1880,7 +2017,7 @@ function renderDetailCard(r, mode) {
   // Walk-forward section
   if (r.walkforward) {
     var wfLabel = mode === 'dual' ? 'Dual' : '@' + r.bestTime;
-    html += renderWalkforwardHTML(r.walkforward, wfLabel);
+    html += renderWalkforwardHTML(r.walkforward, wfLabel, null, r.allWalkforwardResults, r.bestTime, r.compositeScores);
   }
 
   html += '</div></div>';
@@ -2045,10 +2182,10 @@ function renderCombinedDetailCard(r) {
 
   // Walk-forward sections
   if (r.dual && r.dual.walkforward) {
-    html += renderWalkforwardHTML(r.dual.walkforward, 'Dual', 'DUAL');
+    html += renderWalkforwardHTML(r.dual.walkforward, 'Dual', 'DUAL', r.dual.allWalkforwardResults, r.dual.bestTime, r.dual.compositeScores);
   }
   if (r.single && r.single.walkforward) {
-    html += renderWalkforwardHTML(r.single.walkforward, 'Single @' + r.single.bestTime, 'SINGLE');
+    html += renderWalkforwardHTML(r.single.walkforward, 'Single @' + r.single.bestTime, 'SINGLE', r.single.allWalkforwardResults, r.single.bestTime, r.single.compositeScores);
   }
 
   html += '</div></div>';
@@ -2074,6 +2211,27 @@ function scrollToCard(id) {
   if (card) {
     card.classList.add('expanded');
     card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+}
+
+function switchWfTab(btn, uid, time) {
+  // Update tab buttons
+  var tabs = document.querySelectorAll('.wf-tab[data-uid="' + uid + '"]');
+  for (var i = 0; i < tabs.length; i++) {
+    if (tabs[i].getAttribute('data-time') === time) {
+      tabs[i].style.background = 'var(--accent,#58a6ff)';
+      tabs[i].style.color = '#0d1117';
+      tabs[i].style.fontWeight = '600';
+    } else {
+      tabs[i].style.background = 'var(--bg2,#21262d)';
+      tabs[i].style.color = 'var(--text2,#8b949e)';
+      tabs[i].style.fontWeight = 'normal';
+    }
+  }
+  // Show/hide panels
+  var panels = document.querySelectorAll('.wf-panel[data-uid="' + uid + '"]');
+  for (var i = 0; i < panels.length; i++) {
+    panels[i].style.display = panels[i].getAttribute('data-time') === time ? '' : 'none';
   }
 }
 
