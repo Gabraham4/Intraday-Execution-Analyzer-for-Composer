@@ -4,9 +4,14 @@ Find the best time of day to execute your [Composer.trade](https://www.composer.
 
 ## Features
 
-- **Three analysis modes** — Dual (add morning trade + EOD), Single (replace EOD with a different time), Combined (both + cross-comparison)
-- **Composite scoring** — 4-axis quality score (Return, Drawdown, Neighbors, Walk-Forward) with labels: STRONG (75+), GOOD (55-74), MARGINAL (40-54), WEAK (<40)
-- **Walk-forward validation** — Rolling out-of-sample consistency check across ALL tested times at zero extra cost
+- **Four analysis modes** — Dual (add morning trade + EOD), Single (replace EOD with a different time), Cash (go to cash midday, re-enter at EOD), Combined (all three + cross-comparison)
+- **Composer Baseline** — Use Composer's actual backtest equity curve (Xignite prices) as the EOD baseline for exact comparison, or fall back to Yahoo-based simulation
+- **Composite scoring** — 5-axis quality score (Return, Drawdown, Neighbors, Robustness Check, Walk-Forward Test) with labels: STRONG (75+), GOOD (55-74), MARGINAL (40-54), WEAK (<40)
+- **Two-tier walk-forward validation:**
+  - **Robustness Check** (post-hoc slicing) — Slices completed backtest into 21-day windows to verify alpha is consistent, not concentrated in outliers
+  - **Walk-Forward Test** (true OOS) — Trains on rolling 63-day windows, picks best time using only past data, tests on next unseen 21-day window. Simulates real-time decision-making.
+- **Smart candidate selection** — Walk-forward testing runs only on the top 10 candidates (not all times), selected by base scoring with positive improvement required
+- **Unified tab interface** — Click any candidate time to see both Robustness Check and Walk-Forward Test results side-by-side
 - **Web GUI** — Browser-based dashboard with interactive results and HTML report export
 - **Full CLI** — Scriptable command-line interface for automation and batch analysis
 - **Alpaca data** — Up to 2 years of 5-minute or 15-minute intraday bars via free Alpaca paper account
@@ -73,11 +78,11 @@ Composer keys let the analyzer browse your portfolio and watchlist to select str
 ### Web GUI
 
 1. Launch with `node app/gui-server.js` (or `npm start`)
-2. **Settings** (gear icon) — enter your API keys and configure timeframe (5-min or 15-min)
+2. **Settings** (gear icon) — enter your API keys, configure timeframe (5-min or 15-min), and choose EOD baseline source
 3. **Sidebar** — click "Load Portfolio" or "Load Watchlist" to see your strategies (requires Composer keys), or paste strategy IDs manually
 4. **Select** strategies using checkboxes
-5. **Choose mode** — Dual, Single, or Combined
-6. **Enable Walk-Forward** (checkbox, on by default) for out-of-sample validation
+5. **Choose mode** — Dual, Single, Cash, or Combined
+6. **Enable Robustness Check** and/or **Walk-Forward Test** (checkboxes)
 7. Click **Run Analysis**
 8. View results inline or open saved HTML reports from the `reports/` folder
 
@@ -92,10 +97,16 @@ node app/intraday-analyzer-alpaca-v2.0.js
 # Direct commands
 node app/intraday-analyzer-alpaca-v2.0.js dual <symphonyId>
 node app/intraday-analyzer-alpaca-v2.0.js single <symphonyId>
+node app/intraday-analyzer-alpaca-v2.0.js cash <symphonyId>
 node app/intraday-analyzer-alpaca-v2.0.js combined <symphonyId>
 
-# With walk-forward
-node app/intraday-analyzer-alpaca-v2.0.js combined <symphonyId> --walkforward
+# With walk-forward tiers
+node app/intraday-analyzer-alpaca-v2.0.js dual <id> --wf              # Robustness Check only
+node app/intraday-analyzer-alpaca-v2.0.js dual <id> --oos-wf          # Walk-Forward Test only
+node app/intraday-analyzer-alpaca-v2.0.js dual <id> --wf --oos-wf     # Both tiers
+
+# With Composer baseline
+node app/intraday-analyzer-alpaca-v2.0.js dual <id> --composer-baseline
 
 # Configure API keys
 node app/intraday-analyzer-alpaca-v2.0.js config
@@ -110,6 +121,23 @@ You don't need Composer API keys to run analyses. To get a strategy's ID:
 3. Copy the ID from the URL (e.g., `ABC123XYZ`)
 4. Paste it directly into the GUI's strategy input, or pass it as a CLI argument
 
+## Analysis Modes
+
+### Dual Time
+"Should I trade at BOTH a morning time AND Composer's EOD?"
+Simulates using "Run Now" mid-morning + letting Composer auto-trade at EOD. The strategy re-evaluates conditions at both times, potentially catching moves earlier.
+
+### Single Time
+"Should I REPLACE EOD with a different time entirely?"
+Simulates trading ONLY at a different time, skipping EOD.
+
+### Cash-at-Time
+"Should I go to cash midday and re-enter at EOD?"
+Simulates liquidating all positions at a morning time (sitting in cash earning 0% through the afternoon), then letting Composer buy back into positions at EOD. Tests whether avoiding intraday volatility improves returns.
+
+### Combined
+Runs all three modes and recommends the best approach considering return improvement, drawdown risk, and walk-forward consistency.
+
 ## How It Works
 
 For each strategy, the analyzer:
@@ -118,8 +146,52 @@ For each strategy, the analyzer:
 2. **Downloads intraday price data** for all tickers (5-min or 15-min bars from Alpaca)
 3. **Re-evaluates the strategy's conditions** at each candidate time using prices available at that moment
 4. **Simulates execution** — enters positions at the candidate time's prices instead of end-of-day
-5. **Compares returns** across all time slots using composite scoring (return improvement, drawdown quality, neighbor robustness, walk-forward consistency)
-6. **Validates with walk-forward** — rolling out-of-sample windows derived from equity curves at zero extra computation cost
+5. **Scores each time** on 3 base axes: return improvement (with absolute floor for negative improvements), drawdown quality, and neighbor robustness
+6. **Selects top 10 candidates** — only times with positive improvement qualify for walk-forward testing
+7. **Validates with Robustness Check** — post-hoc window slicing to verify consistency
+8. **Validates with Walk-Forward Test** — true out-of-sample rolling train/test to simulate real-time decision-making
+9. **Produces final composite score** with dynamic weights based on which tiers are enabled
+
+## EOD Baseline Options
+
+In Settings, you can choose between two EOD baseline sources:
+
+- **Custom Yahoo EOD** — Simulates strategy evaluation using Yahoo Finance daily closes. Works without Composer API keys. EOD time is configurable (15:45, 15:50, 15:55, 16:00).
+- **Composer Backtest** — Uses Composer's actual backtest equity curve (`dvm_capital`) with Xignite prices. This is the ground truth — the exact returns Composer would have produced. Requires Composer API keys. The EOD time selector is disabled in this mode since Composer uses its own fixed trading window.
+
+## Scoring System
+
+Each candidate time is scored 0-100 on up to 5 axes:
+
+| Axis | No WF | Tier 1 | Tier 2 | Both |
+|------|-------|--------|--------|------|
+| Return improvement | 40% | 30% | 30% | 25% |
+| Drawdown quality | 25% | 20% | 20% | 15% |
+| Neighbor robustness | 35% | 25% | 25% | 20% |
+| Robustness Check (RC) | — | 25% | — | 20% |
+| Walk-Forward Test (OOS) | — | — | 25% | 20% |
+
+**Return score** uses rank among tested times with an absolute quality floor: if a time's improvement is negative, its score is capped near zero regardless of rank. This prevents Cash mode from showing high scores when all times underperform EOD.
+
+**Labels:** STRONG (75+), GOOD (55-74), MARGINAL (40-54), WEAK (<40)
+
+## Walk-Forward Tiers
+
+### Tier 1: Robustness Check (post-hoc slicing)
+Slices the completed backtest equity curve into rolling 21-day windows and checks: "In how many windows did this time beat EOD?" This catches strategies where the improvement is driven by a few huge outlier windows rather than consistent alpha.
+
+- **CONSISTENT** (70%+ win rate) — Alpha is persistent and reliable
+- **EPISODIC** (40-70%) — Alpha is real but regime-dependent
+- **OVERFITTED** (<40%) — Alpha concentrated in few windows, likely curve-fitted
+
+### Tier 2: Walk-Forward Test (true OOS)
+For each rolling 63-day training window, picks the best time using only past data, then tests on the next unseen 21-day window. This simulates what would have happened if you started using the tool at any point in the past.
+
+- **OOS_CONFIRMED** (65%+ win rate, positive alpha) — Signal is real
+- **OOS_DEGRADED** (40%+ win rate or positive alpha) — Signal exists but weaker than backtest suggests
+- **OOS_FAILED** — Signal doesn't hold out-of-sample
+
+**Degradation ratio** compares OOS annualized alpha to full-backtest alpha. >= 0.50 is ACCEPTABLE, >= 0.75 is EXCELLENT, < 0.25 is SEVERE.
 
 ## Security
 

@@ -38,7 +38,7 @@ const CONFIG_FILE_LEGACY = path.join(APP_DIR, 'analyzer-config.json');
 
 const CONFIG = {
   TEST_TIMES: ['09:30', '09:35', '09:45', '10:00', '10:30', '11:00', '12:00', '13:00', '13:45'],
-  EOD_TIME: '15:45',
+  EOD_TIME: '16:00',
   EOD_TIME_OPTIONS: ['15:45', '15:50', '15:55', '16:00'],
   INTRADAY_INTERVAL: '5m',       // 5-minute bars for Yahoo
   ALPACA_TIMEFRAME: '15Min',     // Default: 15Min (fast). Use --5min for 5Min (precise)
@@ -51,12 +51,17 @@ const CONFIG = {
   MAX_DAILY_DAYS: 730,            // 2 years needed for Wilder RSI to stabilize properly
   alpaca: null,                   // Loaded from config file at startup
   composer: null,                 // Loaded from config file at startup
-  dataSource: 'auto',             // 'alpaca' | 'yahoo' | 'auto'
+  dataSource: 'hybrid',           // 'hybrid' (Alpaca intraday + Yahoo daily) | 'alpaca' | 'yahoo' | 'auto'
   debugCompare: false,            // --debug-compare flag
   debugInverseVol: false,         // --debug-invvol flag
-  walkforward: false,             // --walkforward flag
+  walkforward: false,             // --walkforward flag (Tier 1: consistency check)
   wfWindowSize: 21,               // Walk-forward window size (~1 month)
   wfStepSize: 21,                 // Walk-forward step size (non-overlapping)
+  oosWalkforward: false,          // --oos-wf flag (Tier 2: true out-of-sample)
+  oosTrainWindowSize: 63,         // OOS training window (~3 months)
+  oosStepSize: 21,                // OOS test window size (~1 month)
+  wfMaxCandidates: 10,            // Max candidate times for WF testing (both tiers)
+  composerBaseline: false,        // Use Composer's actual backtest holdings as EOD baseline
   dateStart: null,                // Custom backtest start date (YYYY-MM-DD) or null for all
   dateEnd: null,                  // Custom backtest end date (YYYY-MM-DD) or null for all
 };
@@ -66,7 +71,18 @@ const CONFIG = {
 // ============================================================================
 
 function deriveEncryptionKey() {
-  const material = os.hostname() + os.userInfo().username + 'intraday-analyzer-salt';
+  // Use stable hardware UUID (macOS IOPlatformUUID) instead of hostname,
+  // which can change with DHCP/cable modem swaps
+  let machineId;
+  try {
+    machineId = require('child_process')
+      .execSync('ioreg -rd1 -c IOPlatformExpertDevice | awk -F\\" \'/IOPlatformUUID/{print $4}\'', { timeout: 3000 })
+      .toString().trim();
+  } catch (e) {
+    machineId = '';
+  }
+  // Fallback to hostname if UUID unavailable (non-macOS)
+  const material = (machineId || os.hostname()) + os.userInfo().username + 'intraday-analyzer-salt';
   return crypto.createHash('sha256').update(material).digest();
 }
 
@@ -120,7 +136,7 @@ function loadConfig() {
   // Priority: env vars > config file
   const apiKey = process.env.ALPACA_API_KEY || fileConfig.alpacaApiKey || null;
   const apiSecret = process.env.ALPACA_API_SECRET || fileConfig.alpacaApiSecret || null;
-  const dataSource = process.env.DATA_SOURCE || fileConfig.dataSource || 'auto';
+  const dataSource = process.env.DATA_SOURCE || fileConfig.dataSource || 'hybrid';
   const composerKeyId = process.env.COMPOSER_KEY_ID || fileConfig.composerKeyId || null;
   const composerSecret = process.env.COMPOSER_SECRET || fileConfig.composerSecret || null;
 
@@ -138,7 +154,7 @@ function saveConfig(config) {
     ...existing,
     alpacaApiKey: config.apiKey ?? existing.alpacaApiKey ?? '',
     alpacaApiSecret: config.apiSecret ?? existing.alpacaApiSecret ?? '',
-    dataSource: config.dataSource || existing.dataSource || 'auto',
+    dataSource: config.dataSource || existing.dataSource || 'hybrid',
     composerKeyId: config.composerKeyId ?? existing.composerKeyId ?? '',
     composerSecret: config.composerSecret ?? existing.composerSecret ?? '',
   };
@@ -158,7 +174,10 @@ function hasComposerKeys() {
   const cfg = loadConfig();
   CONFIG.alpaca = cfg;
   CONFIG.composer = { keyId: cfg.composerKeyId, secret: cfg.composerSecret };
-  CONFIG.dataSource = cfg.dataSource;
+  // Migrate 'auto' → 'hybrid': Alpaca IEX daily data has stale prices for low-volume ETFs
+  // (e.g., XNTK shows 212.42 when actual close is 220.12). Hybrid uses Yahoo daily (accurate)
+  // + Alpaca intraday (extended history). Use --source=alpaca to override if needed.
+  CONFIG.dataSource = cfg.dataSource === 'auto' ? 'hybrid' : cfg.dataSource;
 
   if (hasAlpacaKeys()) {
     CONFIG.MAX_INTRADAY_DAYS = CONFIG.MAX_INTRADAY_DAYS_ALPACA;
@@ -388,8 +407,217 @@ function normalizeScoreTreeTickers(node) {
     node['lhs-val'] = normalizeTicker(node['lhs-val']);
   if (node['rhs-val'] && typeof node['rhs-val'] === 'string' && !node['rhs-fixed-value?'] && (node['rhs-val'].includes('::') || node['rhs-val'].includes('//')))
     node['rhs-val'] = normalizeTicker(node['rhs-val']);
+  // Normalize tickers in compound conditions
+  if (node.condition && node.condition.conditions) {
+    for (const sub of node.condition.conditions) {
+      if (sub.lhs && sub.lhs.ticker) {
+        sub.lhs.ticker = sub.lhs.ticker.replace(/^(EQUITIES|CRYPTO)::/, '').replace(/\/\/USD$/, '');
+      }
+      if (sub.rhs && sub.rhs.ticker) {
+        sub.rhs.ticker = sub.rhs.ticker.replace(/^(EQUITIES|CRYPTO)::/, '').replace(/\/\/USD$/, '');
+      }
+    }
+  }
   if (node.children) node.children.forEach(c => normalizeScoreTreeTickers(c));
   return node;
+}
+
+/**
+ * Check if an if-child node has a compound condition (ANY/ALL)
+ */
+function isCompoundCondition(node) {
+  return node.condition && node.condition['condition-type'] === 'compound';
+}
+
+/**
+ * Compound condition nodes may have a top-level lhs-fn/lhs-val condition that is
+ * separate from (and not duplicated in) the condition.conditions[] array.
+ * This function evaluates that top-level condition if it exists and is not already
+ * the first sub-condition. Returns the result, or undefined if no extra condition.
+ *
+ * Composer format: the if-child node has both:
+ *   - Top-level: lhs-fn, lhs-val, comparator, rhs-val (a regular condition)
+ *   - condition: { operator, conditions: [...] } (compound sub-conditions)
+ * The top-level condition acts as an additional sub of the compound operator.
+ */
+function evalCompoundTopLevelCondition(cond, dailyData, intradayData, date, time, recordDiag) {
+  // Only applies if compound AND has a valid top-level condition
+  if (!cond['lhs-fn'] || !cond['lhs-val']) return undefined;
+
+  // Check if the top-level is already duplicated as the first sub-condition
+  const subs = cond.condition?.conditions;
+  if (subs && subs.length > 0) {
+    const sub0 = subs[0];
+    if (sub0.lhs) {
+      let sub0Ticker = sub0.lhs.ticker;
+      if (sub0Ticker === '%' && sub0.tickers?.length) sub0Ticker = sub0.tickers[0];
+      const sub0Fn = sub0.lhs.fn;
+      const sub0Cmp = sub0.comparator;
+      if (sub0Fn === cond['lhs-fn'] && sub0Ticker === cond['lhs-val'] && sub0Cmp === cond.comparator) {
+        return undefined; // Already duplicated in subs
+      }
+    }
+  }
+
+  const lhsWindow = cond['lhs-fn-params']?.window || parseInt(cond['lhs-window-days']) || 14;
+  const rhsWindow = cond['rhs-fn-params']?.window || parseInt(cond['rhs-window-days']) || 14;
+  const c = {
+    lf: cond['lhs-fn'], lv: cond['lhs-val'], lw: lhsWindow,
+    cmp: cond.comparator, rv: cond['rhs-val'], rf: cond['rhs-fixed-value?'],
+    rfn: cond['rhs-fn'], rw: rhsWindow
+  };
+  return evalCond(c, dailyData, intradayData, date, time, recordDiag);
+}
+
+/**
+ * Convert a binary sub-condition from the new structured format to the compact
+ * format that evalCond() expects. This allows reusing evalCond() without modification.
+ *
+ * Input (binary sub-condition):
+ *   { "condition-type": "binary", "lhs": { "fn": "relative-strength-index", "params": { "window": 10 }, "ticker": "QQQ" }, "comparator": "gt", "rhs": { "constant": 83 } }
+ *
+ * Output (compact object for evalCond):
+ *   { lf: "relative-strength-index", lv: "QQQ", lw: 10, cmp: "gt", rv: "83", rf: true }
+ */
+function flattenCompoundSubCondition(binaryCond) {
+  // Guard: if this is a nested compound (ANY/ALL inside ANY/ALL), return null
+  // Callers must handle nested compounds recursively
+  if (!binaryCond.lhs || binaryCond['condition-type'] === 'compound') {
+    return null;
+  }
+  const lhsWindow = binaryCond.lhs.params?.window || 14;
+  // Resolve '%' template placeholder: actual ticker is in tickers[] array
+  let lhsTicker = binaryCond.lhs.ticker;
+  if (lhsTicker === '%' && binaryCond.tickers && binaryCond.tickers.length > 0) {
+    lhsTicker = binaryCond.tickers[0];
+  }
+  const compact = {
+    lf: binaryCond.lhs.fn,
+    lv: lhsTicker,
+    lw: lhsWindow,
+    cmp: binaryCond.comparator,
+  };
+  // RHS: constant (fixed value) or dynamic (fn-based)
+  if (binaryCond.rhs.constant !== undefined) {
+    compact.rf = true;
+    compact.rv = String(binaryCond.rhs.constant);
+  } else if (binaryCond.rhs.fn) {
+    compact.rf = false;
+    compact.rfn = binaryCond.rhs.fn;
+    // Resolve '%' template placeholder for RHS ticker too
+    let rhsTicker = binaryCond.rhs.ticker;
+    if (rhsTicker === '%' && binaryCond.tickers && binaryCond.tickers.length > 0) {
+      rhsTicker = binaryCond.tickers[0];
+    }
+    compact.rv = rhsTicker;
+    compact.rw = binaryCond.rhs.params?.window || 14;
+  }
+  return compact;
+}
+
+/**
+ * Recursively evaluate a compound sub-condition, handling nested compounds (ANY of ALLs, etc.)
+ */
+function evalCompoundSubRecursive(sub, dailyData, intradayData, date, time, recordDiag) {
+  if (sub['condition-type'] === 'compound' || (sub.operator && sub.conditions)) {
+    // Nested compound — recurse
+    const nestedOp = sub.operator;
+    const nestedResults = sub.conditions.map(nested =>
+      evalCompoundSubRecursive(nested, dailyData, intradayData, date, time, recordDiag)
+    );
+    // Three-valued logic: short-circuit before considering nulls
+    // ANY: TRUE if any sub is TRUE (regardless of nulls); null only if no TRUE and some null
+    // ALL: FALSE if any sub is FALSE (regardless of nulls); null only if no FALSE and some null
+    const hasNull = nestedResults.some(s => s === null);
+    if (nestedOp === 'any') {
+      if (nestedResults.some(s => s === true)) return true;
+      return hasNull ? null : false;
+    } else { // 'all'
+      if (nestedResults.some(s => s === false)) return false;
+      return hasNull ? null : true;
+    }
+  }
+  // Binary sub-condition
+  const c = flattenCompoundSubCondition(sub);
+  if (!c) return null;
+  const result = evalCond(c, dailyData, intradayData, date, time, recordDiag);
+  // Debug: log every compound sub-condition evaluation
+  if (process.env.DEBUG_COMPOUND === '1') {
+    const lp = buildIndicatorPrices(c.lv, dailyData, intradayData, date, time);
+    const lVal = lp ? evalInd(c.lf, lp, c.lw || 14) : null;
+    const rVal = c.rf ? parseFloat(c.rv) : '?';
+    console.error(`  COMPOUND_SUB ${date} ${c.lv}.${c.lf}(${c.lw})=${lVal !== null ? lVal.toFixed(2) : 'null'} ${c.cmp} ${rVal} → ${result} [${lp ? lp.length + ' prices' : 'no data'}]`);
+  }
+  return result;
+}
+
+/**
+ * Convert a binary sub-condition to the flat node format used by evalCondVerbose().
+ * Also used for collectConditions() which reads flat node fields.
+ */
+function flattenCompoundToLegacy(binaryCond) {
+  // Guard: nested compound conditions don't have lhs/rhs
+  if (!binaryCond.lhs || binaryCond['condition-type'] === 'compound') {
+    return null;
+  }
+  // Resolve '%' template placeholder: actual ticker is in tickers[] array
+  let lhsTicker = binaryCond.lhs.ticker;
+  if (lhsTicker === '%' && binaryCond.tickers && binaryCond.tickers.length > 0) {
+    lhsTicker = binaryCond.tickers[0];
+  }
+  const flat = {
+    'lhs-fn': binaryCond.lhs.fn,
+    'lhs-val': lhsTicker,
+    'comparator': binaryCond.comparator,
+  };
+  if (binaryCond.lhs.params) {
+    flat['lhs-fn-params'] = { window: binaryCond.lhs.params.window || 14 };
+  }
+  if (binaryCond.rhs.constant !== undefined) {
+    flat['rhs-fixed-value?'] = true;
+    flat['rhs-val'] = String(binaryCond.rhs.constant);
+  } else if (binaryCond.rhs.fn) {
+    flat['rhs-fixed-value?'] = false;
+    flat['rhs-fn'] = binaryCond.rhs.fn;
+    // Resolve '%' template placeholder for RHS ticker too
+    let rhsTicker = binaryCond.rhs.ticker;
+    if (rhsTicker === '%' && binaryCond.tickers && binaryCond.tickers.length > 0) {
+      rhsTicker = binaryCond.tickers[0];
+    }
+    flat['rhs-val'] = rhsTicker;
+    if (binaryCond.rhs.params) {
+      flat['rhs-fn-params'] = { window: binaryCond.rhs.params.window || 14 };
+    }
+  }
+  return flat;
+}
+
+/**
+ * Extract all tickers from a compound condition's sub-conditions
+ */
+function extractCompoundTickers(condition) {
+  const tickers = new Set();
+  if (condition && condition.conditions) {
+    for (const sub of condition.conditions) {
+      // Recurse into nested compound conditions
+      if (sub['condition-type'] === 'compound' || (sub.operator && sub.conditions)) {
+        for (const t of extractCompoundTickers(sub)) tickers.add(t);
+      } else {
+        // Resolve '%' template placeholder: actual ticker is in tickers[] array
+        let lhsTicker = sub.lhs?.ticker;
+        if (lhsTicker === '%' && sub.tickers && sub.tickers.length > 0) {
+          lhsTicker = sub.tickers[0];
+        }
+        let rhsTicker = sub.rhs?.ticker;
+        if (rhsTicker === '%' && sub.tickers && sub.tickers.length > 0) {
+          rhsTicker = sub.tickers[0];
+        }
+        if (lhsTicker && lhsTicker !== '%') tickers.add(lhsTicker);
+        if (rhsTicker && rhsTicker !== '%') tickers.add(rhsTicker);
+      }
+    }
+  }
+  return tickers;
 }
 
 async function getOOSDate(id) {
@@ -1144,7 +1372,7 @@ function maxDrawdown(prices, w) {
     const dd = (peak - p) / peak;
     if (dd > maxDD) maxDD = dd;
   }
-  return maxDD * 100; // Composer returns percentage form; positive value: smaller = better drawdown
+  return maxDD * 100; // Composer uses POSITIVE percentage for MaxDD in filter sorting: 5.0 means 5% drawdown
 }
 
 function stdDevReturn(prices, w) {
@@ -1266,6 +1494,35 @@ function buildIndicatorPrices(ticker, dailyData, intradayData, evalDate, evalTim
   return prices.length > 0 ? prices : null;
 }
 
+// Cache for reverse-split adjustment factors: key = "ticker_date" -> ratio (daily/intraday)
+const SPLIT_ADJ_CACHE = new Map();
+
+function getSplitAdjustment(ticker, date, intradayData, dailyData) {
+  if (!dailyData) return 1;
+  const key = `${ticker}_${date}`;
+  if (SPLIT_ADJ_CACHE.has(key)) return SPLIT_ADJ_CACHE.get(key);
+
+  let adj = 1;
+  const dailyClose = dailyData[ticker]?.byDate?.[date]?.close;
+  const dd = intradayData[ticker]?.byDT?.[date];
+  if (dailyClose && dd) {
+    // Compare daily close to last intraday bar close to detect split mismatch.
+    // Reverse splits (e.g., 1:10, 1:20) cause the intraday cache to have pre-split
+    // prices while Yahoo daily data has post-split adjusted prices.
+    const times = Object.keys(dd).sort();
+    const lastBar = times.length > 0 ? (dd[times[times.length - 1]]?.close ?? dd[times[times.length - 1]]?.open) : null;
+    if (lastBar && lastBar > 0) {
+      const ratio = dailyClose / lastBar;
+      // If ratio > 3x or < 0.33x, this is a reverse/forward split mismatch
+      if (ratio > 3 || ratio < 0.33) {
+        adj = ratio;
+      }
+    }
+  }
+  SPLIT_ADJ_CACHE.set(key, adj);
+  return adj;
+}
+
 function getIntradayPrice(ticker, intradayData, date, time, dailyData = null) {
   // Special case: 16:00 uses daily close (official market close)
   if (time === '16:00' && dailyData) {
@@ -1304,6 +1561,14 @@ function getIntradayPrice(ticker, intradayData, date, time, dailyData = null) {
     if (dailyClose) return dailyClose;
   }
 
+  // Adjust for reverse/forward splits: intraday cache may have unadjusted prices
+  // while daily data has adjusted prices. Detect by comparing daily open to first
+  // intraday bar; if ratio > 3x, apply correction to align price scales.
+  if (best !== null && dailyData) {
+    const adj = getSplitAdjustment(ticker, date, intradayData, dailyData);
+    if (adj !== 1) best *= adj;
+  }
+
   return best;
 }
 
@@ -1318,6 +1583,12 @@ function extractTickers(n, t = new Set()) {
   const isValidTicker = (v) => typeof v === 'string' && /^[A-Z][A-Z0-9\/\-\.]*$/.test(v);
   if (n['lhs-val'] && isValidTicker(n['lhs-val'])) t.add(n['lhs-val']);
   if (n['rhs-val'] && isValidTicker(n['rhs-val']) && !n['rhs-fixed-value?']) t.add(n['rhs-val']);
+  // Extract tickers from compound conditions
+  if (isCompoundCondition(n)) {
+    for (const ticker of extractCompoundTickers(n.condition)) {
+      t.add(ticker);
+    }
+  }
   if (n.children) n.children.forEach(c => extractTickers(c, t));
   return t;
 }
@@ -1404,15 +1675,35 @@ function getAssetsWithWeights(node, dailyData, intradayData, date, time, parentW
       }
 
       if (cond) {
-        // Handle both formats: lhs-fn-params.window (new) and lhs-window-days (legacy string)
-        const lhsWindow = cond['lhs-fn-params']?.window || parseInt(cond['lhs-window-days']) || 14;
-        const rhsWindow = cond['rhs-fn-params']?.window || parseInt(cond['rhs-window-days']) || 14;
-        const c = {
-          lf: cond['lhs-fn'], lv: cond['lhs-val'], lw: lhsWindow,
-          cmp: cond.comparator, rv: cond['rhs-val'], rf: cond['rhs-fixed-value?'],
-          rfn: cond['rhs-fn'], rw: rhsWindow
-        };
-        const r = evalCond(c, dailyData, intradayData, date, time, recordDiag);
+        let r;
+        if (isCompoundCondition(cond)) {
+          // Evaluate compound condition (ANY/ALL) — supports nested compounds
+          const { operator, conditions } = cond.condition;
+          const subResults = conditions.map(sub =>
+            evalCompoundSubRecursive(sub, dailyData, intradayData, date, time, recordDiag)
+          );
+          // Three-valued logic: short-circuit before considering nulls
+          // ANY: TRUE if any sub is TRUE (regardless of nulls); null only if no TRUE and some null
+          // ALL: FALSE if any sub is FALSE (regardless of nulls); null only if no FALSE and some null
+          const hasNull = subResults.some(s => s === null);
+          if (operator === 'any') {
+            if (subResults.some(s => s === true)) r = true;
+            else r = hasNull ? null : false;
+          } else { // 'all'
+            if (subResults.some(s => s === false)) r = false;
+            else r = hasNull ? null : true;
+          }
+        } else {
+          // Handle both formats: lhs-fn-params.window (new) and lhs-window-days (legacy string)
+          const lhsWindow = cond['lhs-fn-params']?.window || parseInt(cond['lhs-window-days']) || 14;
+          const rhsWindow = cond['rhs-fn-params']?.window || parseInt(cond['rhs-window-days']) || 14;
+          const c = {
+            lf: cond['lhs-fn'], lv: cond['lhs-val'], lw: lhsWindow,
+            cmp: cond.comparator, rv: cond['rhs-val'], rf: cond['rhs-fixed-value?'],
+            rfn: cond['rhs-fn'], rw: rhsWindow
+          };
+          r = evalCond(c, dailyData, intradayData, date, time, recordDiag);
+        }
 
         if (r === true && cond.children) {
           // Distribute weight equally among children of the true branch
@@ -1919,45 +2210,102 @@ function walkVerbose(node, dailyData, intradayData, date, time, indent = 0) {
       }
 
       if (cond) {
-        const lhsWindow = cond['lhs-fn-params']?.window || parseInt(cond['lhs-window-days']) || 14;
-        const rhsWindow = cond['rhs-fn-params']?.window || parseInt(cond['rhs-window-days']) || 14;
-        const c = {
-          lf: cond['lhs-fn'], lv: cond['lhs-val'], lw: lhsWindow,
-          cmp: cond.comparator, rv: cond['rhs-val'], rf: cond['rhs-fixed-value?'],
-          rfn: cond['rhs-fn'], rw: rhsWindow
-        };
+        let combinedResult;
+        if (isCompoundCondition(cond)) {
+          // Evaluate compound condition (ANY/ALL) with verbose output
+          const { operator, conditions } = cond.condition;
+          const opLabel = operator === 'any' ? 'ANY (OR)' : 'ALL (AND)';
+          console.log(`${pad}┌─ IF [${opLabel}] compound condition (${conditions.length} sub-conditions):`);
 
-        const v = evalCondVerbose(c, dailyData, intradayData, date, time);
+          const subResults = [];
+          for (let si = 0; si < conditions.length; si++) {
+            const sub = conditions[si];
+            // Handle nested compound conditions (ANY of ALLs, etc.)
+            if (sub['condition-type'] === 'compound' || (sub.operator && sub.conditions)) {
+              const nestedOp = sub.operator;
+              const nestedLabel = nestedOp === 'any' ? 'ANY' : 'ALL';
+              console.log(`${pad}│  [${si + 1}] Nested [${nestedLabel}] (${sub.conditions.length} sub-conditions):`);
+              const nestedResult = evalCompoundSubRecursive(sub, dailyData, intradayData, date, time, false);
+              const nestedEmoji = nestedResult === true ? 'TRUE' : nestedResult === false ? 'FALSE' : 'NULL';
+              console.log(`${pad}│      => ${nestedEmoji}`);
+              subResults.push(nestedResult);
+              continue;
+            }
+            const flatSub = flattenCompoundSubCondition(sub);
+            if (!flatSub) { subResults.push(null); continue; }
+            const v = evalCondVerbose(flatSub, dailyData, intradayData, date, time);
 
-        // Format LHS
-        const lhsFmt = `${v.lhsTicker}.${formatFnName(v.lhsFn)}(${v.lhsWindow})`;
-        const lhsValFmt = v.lhsValue !== null ? v.lhsValue.toFixed(4) : 'NULL';
+            const lhsFmt = `${v.lhsTicker}.${formatFnName(v.lhsFn)}(${v.lhsWindow})`;
+            const lhsValFmt = v.lhsValue !== null ? v.lhsValue.toFixed(4) : 'NULL';
+            let rhsFmt, rhsValFmt;
+            if (v.rhsIsFixed) {
+              rhsFmt = `${v.rhsValue}`;
+              rhsValFmt = v.rhsValue.toFixed(4);
+            } else {
+              rhsFmt = `${v.rhsTicker}.${formatFnName(v.rhsFn)}(${v.rhsWindow})`;
+              rhsValFmt = v.rhsValue !== null ? v.rhsValue.toFixed(4) : 'NULL';
+            }
+            const cmpFmt = formatCmp(v.comparator);
+            const subEmoji = v.evalResult === true ? 'TRUE' : v.evalResult === false ? 'FALSE' : 'NULL';
 
-        // Format RHS
-        let rhsFmt, rhsValFmt;
-        if (v.rhsIsFixed) {
-          rhsFmt = `${v.rhsValue}`;
-          rhsValFmt = v.rhsValue.toFixed(4);
+            console.log(`${pad}│  [${si + 1}] ${lhsFmt} ${cmpFmt} ${rhsFmt}`);
+            console.log(`${pad}│      ${lhsValFmt} ${cmpFmt} ${rhsValFmt} => ${subEmoji}`);
+            subResults.push(v.evalResult);
+          }
+
+          // Three-valued logic: short-circuit before considering nulls
+          const hasNull = subResults.some(s => s === null);
+          if (operator === 'any') {
+            if (subResults.some(s => s === true)) combinedResult = true;
+            else combinedResult = hasNull ? null : false;
+          } else { // 'all'
+            if (subResults.some(s => s === false)) combinedResult = false;
+            else combinedResult = hasNull ? null : true;
+          }
+          const resultEmoji = combinedResult === true ? 'TRUE' : combinedResult === false ? 'FALSE' : 'NULL';
+          console.log(`${pad}│     Combined [${opLabel}]: ${resultEmoji}`);
         } else {
-          rhsFmt = `${v.rhsTicker}.${formatFnName(v.rhsFn)}(${v.rhsWindow})`;
-          rhsValFmt = v.rhsValue !== null ? v.rhsValue.toFixed(4) : 'NULL';
+          const lhsWindow = cond['lhs-fn-params']?.window || parseInt(cond['lhs-window-days']) || 14;
+          const rhsWindow = cond['rhs-fn-params']?.window || parseInt(cond['rhs-window-days']) || 14;
+          const c = {
+            lf: cond['lhs-fn'], lv: cond['lhs-val'], lw: lhsWindow,
+            cmp: cond.comparator, rv: cond['rhs-val'], rf: cond['rhs-fixed-value?'],
+            rfn: cond['rhs-fn'], rw: rhsWindow
+          };
+
+          const v = evalCondVerbose(c, dailyData, intradayData, date, time);
+
+          // Format LHS
+          const lhsFmt = `${v.lhsTicker}.${formatFnName(v.lhsFn)}(${v.lhsWindow})`;
+          const lhsValFmt = v.lhsValue !== null ? v.lhsValue.toFixed(4) : 'NULL';
+
+          // Format RHS
+          let rhsFmt, rhsValFmt;
+          if (v.rhsIsFixed) {
+            rhsFmt = `${v.rhsValue}`;
+            rhsValFmt = v.rhsValue.toFixed(4);
+          } else {
+            rhsFmt = `${v.rhsTicker}.${formatFnName(v.rhsFn)}(${v.rhsWindow})`;
+            rhsValFmt = v.rhsValue !== null ? v.rhsValue.toFixed(4) : 'NULL';
+          }
+
+          const cmpFmt = formatCmp(v.comparator);
+          const resultEmoji = v.evalResult === true ? 'TRUE' : v.evalResult === false ? 'FALSE' : 'NULL';
+
+          console.log(`${pad}┌─ IF ${lhsFmt} ${cmpFmt} ${rhsFmt}`);
+          console.log(`${pad}│     LHS: ${lhsValFmt} (${v.lhsDataPoints} data points)`);
+          if (!v.rhsIsFixed) {
+            console.log(`${pad}│     RHS: ${rhsValFmt} (${v.rhsDataPoints} data points)`);
+          }
+          console.log(`${pad}│     Result: ${lhsValFmt} ${cmpFmt} ${rhsValFmt} => ${resultEmoji}`);
+          combinedResult = v.evalResult;
         }
 
-        const cmpFmt = formatCmp(v.comparator);
-        const resultEmoji = v.evalResult === true ? '✅ TRUE' : v.evalResult === false ? '❌ FALSE' : '⚠️  NULL';
-
-        console.log(`${pad}┌─ IF ${lhsFmt} ${cmpFmt} ${rhsFmt}`);
-        console.log(`${pad}│     LHS: ${lhsValFmt} (${v.lhsDataPoints} data points)`);
-        if (!v.rhsIsFixed) {
-          console.log(`${pad}│     RHS: ${rhsValFmt} (${v.rhsDataPoints} data points)`);
-        }
-        console.log(`${pad}│     Result: ${lhsValFmt} ${cmpFmt} ${rhsValFmt} → ${resultEmoji}`);
-
-        if (v.evalResult === true && cond.children) {
+        if (combinedResult === true && cond.children) {
           console.log(`${pad}├─ THEN:`);
           const childWeight = weight / Math.max(cond.children.length, 1);
           cond.children.forEach(child => walk(child, childWeight, depth + 1));
-        } else if ((v.evalResult === false || v.evalResult === null) && els?.children) {
+        } else if ((combinedResult === false || combinedResult === null) && els?.children) {
           console.log(`${pad}├─ ELSE:`);
           const childWeight = weight / Math.max(els.children.length, 1);
           els.children.forEach(child => walk(child, childWeight, depth + 1));
@@ -2797,6 +3145,18 @@ function getTradingDaysFromDaily(dailyData) {
   return Array.from(dates).sort();
 }
 
+// Annualized return from cumulative return and number of trading days
+// Uses 252 trading days per year
+function annualizedReturn(cumReturn, tradingDays) {
+  if (!tradingDays || tradingDays <= 0) return null;
+  const totalReturn = cumReturn / 100; // convert from percentage
+  const years = tradingDays / 252;
+  if (years <= 0) return null;
+  // CAGR = (1 + totalReturn)^(1/years) - 1
+  const cagr = (Math.pow(1 + totalReturn, 1 / years) - 1) * 100;
+  return cagr;
+}
+
 // Filter trading days to custom date range (CONFIG.dateStart / CONFIG.dateEnd)
 function applyDateRange(tradingDays) {
   if (!CONFIG.dateStart && !CONFIG.dateEnd) return tradingDays;
@@ -2879,6 +3239,220 @@ function getDriftedWeights(holdings, dailyData, intradayData, prevDate, currDate
   }
   if (totalValue === 0) return holdings;
   return holdingValues.map(h => ({ ticker: h.ticker, weight: h.value / totalValue }));
+}
+
+// ============================================================================
+// COMPOSER BASELINE (use Composer's actual backtest holdings as EOD baseline)
+// ============================================================================
+
+/**
+ * Fetch Composer's full backtest for a strategy and extract day-by-day holdings from tdvm_weights.
+ * Returns { holdingsByDate: { 'YYYY-MM-DD': [{ticker, weight}] }, equityCurve: {...} } or null on failure.
+ */
+async function fetchComposerBaselineHoldings(symphonyId, startDate, endDate) {
+  return new Promise((resolve) => {
+    const postData = JSON.stringify({
+      start_date: startDate || '2020-01-01',
+      end_date: endDate || new Date().toISOString().split('T')[0],
+      capital: 10000,
+      slippage_percent: 0.0001,
+      apply_reg_fee: true,
+      apply_taf_fee: true,
+      backtest_version: 'v2'
+    });
+
+    const useAuth = hasComposerKeys();
+    const apiPath = useAuth
+      ? `/api/v2/symphonies/${symphonyId}/backtest`
+      : `/api/v2/public/symphonies/${symphonyId}/backtest`;
+    const headers = {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(postData),
+      'Accept': 'application/json',
+    };
+    if (useAuth) {
+      headers['x-api-key-id'] = CONFIG.composer.keyId;
+      headers['Authorization'] = `Bearer ${CONFIG.composer.secret}`;
+      headers['x-origin'] = 'public-api';
+    }
+
+    const req = https.request({
+      hostname: 'backtest-api.composer.trade',
+      port: 443,
+      path: apiPath,
+      method: 'POST',
+      headers,
+      timeout: 60000
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        if (res.statusCode !== 200) {
+          console.error(`  Composer baseline fetch failed: HTTP ${res.statusCode}`);
+          resolve(null);
+          return;
+        }
+        try {
+          const result = JSON.parse(data);
+          const tdvmWeights = result.tdvm_weights;
+          if (!tdvmWeights) {
+            console.error('  Composer baseline: no tdvm_weights in response');
+            resolve(null);
+            return;
+          }
+
+          // Convert epoch days to YYYY-MM-DD dates and build holdingsByDate
+          const epochToDate = (epochDay) => {
+            const d = new Date((epochDay) * 86400000);
+            return d.toISOString().split('T')[0];
+          };
+
+          // Collect all unique epoch days across all tickers
+          const allEpochDays = new Set();
+          for (const ticker in tdvmWeights) {
+            if (ticker === '$USD') continue; // skip cash marker
+            for (const epochDay in tdvmWeights[ticker]) {
+              allEpochDays.add(parseInt(epochDay));
+            }
+          }
+
+          // Build holdingsByDate: for each day, collect all tickers held with their weights
+          const holdingsByDate = {};
+          const sortedEpochDays = [...allEpochDays].sort((a, b) => a - b);
+
+          for (const epochDay of sortedEpochDays) {
+            const dateStr = epochToDate(epochDay);
+            const dayHoldings = [];
+            for (const ticker in tdvmWeights) {
+              if (ticker === '$USD') continue;
+              const w = tdvmWeights[ticker][String(epochDay)];
+              if (w && w > 0.001) { // filter negligible weights
+                // Normalize ticker: strip EQUITIES::TICKER//USD format
+                const cleanTicker = ticker.includes('::') ? ticker.split('::')[1].split('//')[0] : ticker;
+                dayHoldings.push({ ticker: cleanTicker, weight: w });
+              }
+            }
+            if (dayHoldings.length > 0) {
+              holdingsByDate[dateStr] = dayHoldings;
+            }
+          }
+
+          // Also extract rebalance_days for carry-forward logic
+          const rebalanceDays = (result.rebalance_days || []).map(d => epochToDate(d)).sort();
+
+          // Extract dvm_capital: Composer's own equity curve (Xignite prices, exact)
+          let dvmCapital = null;
+          const dvmRaw = result.dvm_capital;
+          if (dvmRaw) {
+            // dvm_capital is { symphonyId: { epochDay: dollarValue } } — find the first key
+            const dvmKey = Object.keys(dvmRaw)[0];
+            if (dvmKey && dvmRaw[dvmKey]) {
+              dvmCapital = {};
+              for (const epochDay in dvmRaw[dvmKey]) {
+                dvmCapital[epochToDate(parseInt(epochDay))] = dvmRaw[dvmKey][epochDay];
+              }
+            }
+          }
+
+          resolve({ holdingsByDate, rebalanceDays, dvmCapital, stats: result.stats || null });
+        } catch (e) {
+          console.error(`  Composer baseline parse error: ${e.message}`);
+          resolve(null);
+        }
+      });
+    });
+    req.on('error', (e) => { console.error(`  Composer baseline error: ${e.message}`); resolve(null); });
+    req.on('timeout', () => { req.destroy(); console.error('  Composer baseline timeout'); resolve(null); });
+    req.write(postData);
+    req.end();
+  });
+}
+
+/**
+ * Run EOD baseline using Composer's actual backtest data.
+ * If dvmCapital is available, uses Composer's exact equity curve (Xignite prices).
+ * Otherwise falls back to re-pricing Composer's holdings with Yahoo/Alpaca data.
+ */
+function runComposerBaselineBacktest(composerHoldings, dailyData, intradayData, tradingDays) {
+  const { holdingsByDate, dvmCapital } = composerHoldings;
+
+  // PREFERRED: Use dvm_capital directly (Composer's exact equity curve, Xignite prices)
+  if (dvmCapital) {
+    // Find the starting value: use the value on the first trading day
+    const firstVal = dvmCapital[tradingDays[0]];
+    if (firstVal && firstVal > 0) {
+      let peak = 100;
+      let maxDD = 0;
+      const equityCurve = [100]; // normalized to start at 100
+
+      for (let i = 0; i < tradingDays.length; i++) {
+        const date = tradingDays[i];
+        const val = dvmCapital[date];
+        let equity;
+        if (val != null) {
+          equity = (val / firstVal) * 100;
+        } else {
+          // If this date is missing from dvm_capital, use previous value
+          equity = equityCurve[equityCurve.length - 1];
+        }
+        equityCurve.push(equity);
+        if (equity > peak) peak = equity;
+        const dd = (peak - equity) / peak * 100;
+        if (dd > maxDD) maxDD = dd;
+      }
+
+      return {
+        cumReturn: equityCurve[equityCurve.length - 1] - 100,
+        maxDD,
+        tradingDays: tradingDays.length,
+        equityCurve
+      };
+    }
+  }
+
+  // FALLBACK: Re-price Composer's holdings with Yahoo/Alpaca data
+  let equity = 100;
+  const equityCurve = [100];
+  let peak = 100;
+  let maxDD = 0;
+  let currentHoldings = [];
+
+  for (let i = 0; i < tradingDays.length; i++) {
+    const date = tradingDays[i];
+    const prevDate = i > 0 ? tradingDays[i - 1] : null;
+
+    if (prevDate && currentHoldings.length > 0) {
+      let dayReturn = 0;
+      let totalWeight = 0;
+      for (const h of currentHoldings) {
+        const prevEOD = getIntradayPrice(h.ticker, intradayData, prevDate, CONFIG.EOD_TIME, dailyData);
+        const currEOD = getIntradayPrice(h.ticker, intradayData, date, CONFIG.EOD_TIME, dailyData);
+        if (prevEOD && currEOD) {
+          dayReturn += h.weight * (currEOD - prevEOD) / prevEOD;
+          totalWeight += h.weight;
+        }
+      }
+      if (totalWeight > 0) {
+        equity *= (1 + dayReturn);
+      }
+    }
+
+    equityCurve.push(equity);
+    if (equity > peak) peak = equity;
+    const dd = (peak - equity) / peak * 100;
+    if (dd > maxDD) maxDD = dd;
+
+    if (holdingsByDate[date]) {
+      currentHoldings = holdingsByDate[date];
+    }
+  }
+
+  return {
+    cumReturn: equity - 100,
+    maxDD,
+    tradingDays: tradingDays.length,
+    equityCurve
+  };
 }
 
 // ============================================================================
@@ -2975,6 +3549,7 @@ function runEODOnlyBacktest(score, dailyData, intradayData, tradingDays, rebalan
   let peak = 100;
   let maxDD = 0;
   let holdings = [];
+  const _debugHoldings = process.env.DEBUG_HOLDINGS === '1';
 
   for (let i = 0; i < tradingDays.length; i++) {
     const date = tradingDays[i];
@@ -3003,6 +3578,12 @@ function runEODOnlyBacktest(score, dailyData, intradayData, tradingDays, rebalan
     const dd = (peak - equity) / peak * 100;
     if (dd > maxDD) maxDD = dd;
 
+    if (_debugHoldings) {
+      const selStr = selection.map(h => `${h.ticker}:${(h.weight*100).toFixed(0)}%`).join(', ');
+      const dayRet = prevDate && holdings.length > 0 ? ((equity / equityCurve[equityCurve.length - 2]) - 1) * 100 : 0;
+      console.error(`DBG ${date} eq=${(equity-100).toFixed(1)}% day=${dayRet >= 0 ? '+' : ''}${dayRet.toFixed(2)}% sel=[${selStr}]`);
+    }
+
     if (selection.length > 0) {
       if (shouldRebalance(holdings, selection, rebalanceThreshold, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, CONFIG.EOD_TIME)) {
         holdings = selection;
@@ -3028,6 +3609,7 @@ function runSingleTimeBacktest(score, dailyData, intradayData, tradingDays, trad
   let peak = 100;
   let maxDD = 0;
   let holdings = [];
+  const _debugHoldings = process.env.DEBUG_HOLDINGS === '1' && tradeTime === CONFIG.EOD_TIME;
 
   for (let i = 0; i < tradingDays.length; i++) {
     const date = tradingDays[i];
@@ -3051,6 +3633,12 @@ function runSingleTimeBacktest(score, dailyData, intradayData, tradingDays, trad
       }
     }
 
+    if (_debugHoldings) {
+      const selStr = selection.map(h => `${h.ticker}:${(h.weight*100).toFixed(0)}%`).join(', ');
+      const dayRet = prevDate && holdings.length > 0 ? ((equity / equityCurve[equityCurve.length - 1]) - 1) * 100 : 0;
+      console.error(`DBG ${date} eq=${(equity-100).toFixed(1)}% day=${dayRet >= 0 ? '+' : ''}${dayRet.toFixed(2)}% hold=[${holdings.map(h=>h.ticker).join(',')}] sel=[${selStr}]`);
+    }
+
     equityCurve.push(equity);
     if (equity > peak) peak = equity;
     const dd = (peak - equity) / peak * 100;
@@ -3065,6 +3653,70 @@ function runSingleTimeBacktest(score, dailyData, intradayData, tradingDays, trad
     } else {
       holdings = []; // Cash signal: liquidate
     }
+  }
+
+  return {
+    cumReturn: equity - 100,
+    maxDD,
+    tradingDays: tradingDays.length,
+    equityCurve
+  };
+}
+
+/**
+ * Cash-at-time backtest: At cashTime, go to cash (liquidate all holdings).
+ * At EOD, strategy runs normally and positions are re-established for overnight.
+ *
+ * Three legs per day:
+ *   LEG 1 (Overnight): Previous EOD holdings from prevDate@EOD to date@cashTime
+ *   LEG 2 (Cash):      Cash from cashTime to EOD — 0% return
+ *   LEG 3 (EOD rebal): Strategy evaluates at EOD, sets holdings for next overnight
+ */
+function runCashTimeBacktest(score, dailyData, intradayData, tradingDays, cashTime, rebalanceThreshold = null) {
+  let equity = 100;
+  const equityCurve = [100];
+  let peak = 100;
+  let maxDD = 0;
+  let holdings = [];  // Array of {ticker, weight}
+
+  for (let i = 0; i < tradingDays.length; i++) {
+    const date = tradingDays[i];
+    const prevDate = i > 0 ? tradingDays[i - 1] : null;
+
+    // LEG 1: Overnight - prev EOD holdings held until cashTime
+    if (prevDate && holdings.length > 0) {
+      let overnightReturn = 0;
+      let totalWeight = 0;
+      for (const h of holdings) {
+        const prevEOD = getIntradayPrice(h.ticker, intradayData, prevDate, CONFIG.EOD_TIME, dailyData);
+        const morning = getIntradayPrice(h.ticker, intradayData, date, cashTime, dailyData);
+        if (prevEOD && morning) {
+          overnightReturn += h.weight * (morning - prevEOD) / prevEOD;
+          totalWeight += h.weight;
+        }
+      }
+      if (totalWeight > 0) {
+        equity *= (1 + overnightReturn);
+      }
+    }
+
+    // At cashTime: go to cash — no strategy evaluation, just liquidate
+    // LEG 2: Cash from cashTime to EOD — 0% return (nothing to do)
+
+    // EOD rebalance: evaluate strategy at EOD, establish holdings for overnight
+    const eodSelection = getAssetsWithWeights(score, dailyData, intradayData, date, CONFIG.EOD_TIME);
+    if (eodSelection.length > 0) {
+      // For threshold check: we're coming from cash so always rebalance
+      // (holdings are empty, so shouldRebalance would always trigger anyway)
+      holdings = eodSelection;
+    } else {
+      holdings = []; // Cash signal: stay in cash
+    }
+
+    equityCurve.push(equity);
+    if (equity > peak) peak = equity;
+    const dd = (peak - equity) / peak * 100;
+    if (dd > maxDD) maxDD = dd;
   }
 
   return {
@@ -3611,6 +4263,455 @@ function selectBestTime(timeResults, eodResult, tradingDays, testTimes, wfEnable
   };
 }
 
+// ============================================================================
+// NEW SCORING PIPELINE (Base Scores → Candidates → WF → Final Scores)
+// ============================================================================
+
+/**
+ * Compute base scores for all times on 3 axes (no WF).
+ * Return score has absolute quality floor — negative improvements get near-zero scores.
+ */
+function computeBaseScores(timeResults, eodResult, testTimes) {
+  const times = testTimes.filter(t => timeResults[t]);
+  if (times.length === 0) return { returnScores: {}, ddScores: {}, neighborScores: {}, times: [] };
+
+  // --- Axis 1: Return improvement (rank-based + absolute quality floor) ---
+  const improvements = times.map(t => timeResults[t].improvement);
+  const sorted = [...improvements].sort((a, b) => a - b);
+
+  const returnScores = {};
+  for (const t of times) {
+    const imp = timeResults[t].improvement;
+    const firstRank = sorted.indexOf(imp);
+    const lastRank = sorted.lastIndexOf(imp);
+    const avgRank = (firstRank + lastRank) / 2;
+    returnScores[t] = times.length > 1 ? avgRank / (times.length - 1) : 1;
+  }
+
+  // Absolute quality floor: penalize negative improvements
+  const bestImprovement = Math.max(...improvements);
+  for (const t of times) {
+    const imp = timeResults[t].improvement;
+    if (bestImprovement <= 0) {
+      // All negative — cap all return scores at 0.2 max
+      returnScores[t] = returnScores[t] * 0.2;
+    } else if (imp <= 0) {
+      // This specific time is negative while others are positive
+      returnScores[t] = returnScores[t] * 0.1;
+    } else {
+      // Positive — scale by how good relative to best
+      const qualityFactor = imp / bestImprovement;
+      returnScores[t] = returnScores[t] * Math.max(0.3, qualityFactor);
+    }
+  }
+
+  // --- Axis 2: DD quality (absolute comparison vs EOD baseline) ---
+  const eodDD = eodResult.maxDD;
+  const ddScores = {};
+  for (const t of times) {
+    const ddDelta = timeResults[t].maxDD - eodDD;
+    if (ddDelta <= 2) {
+      ddScores[t] = 1.0;
+    } else {
+      ddScores[t] = Math.max(0, 1.0 - (ddDelta - 2) / 13);
+    }
+  }
+
+  // --- Axis 3: Neighbor robustness ---
+  const neighborScores = {};
+  for (const t of times) {
+    const idx = times.indexOf(t);
+    let score = 0;
+    let checks = 0;
+
+    for (const offset of [-2, -1, 1, 2]) {
+      const ni = idx + offset;
+      if (ni < 0 || ni >= times.length) continue;
+      checks++;
+      const neighbor = times[ni];
+      const nImp = timeResults[neighbor].improvement;
+      const nDDDelta = timeResults[neighbor].maxDD - eodDD;
+
+      if (nImp > 0) score += 0.6;
+      if (nDDDelta <= 10) score += 0.2;
+      const absOffset = Math.abs(offset);
+      const returnDiff = Math.abs(timeResults[t].improvement - nImp);
+      const maxExpectedDiff = Math.max(5, Math.abs(timeResults[t].improvement) * 0.3) * absOffset;
+      if (maxExpectedDiff > 0.01 && returnDiff <= maxExpectedDiff) score += 0.2;
+      else if (maxExpectedDiff <= 0.01) score += 0.2;
+    }
+
+    const edgePenalty = checks < 4 ? checks / 4 : 1.0;
+    neighborScores[t] = checks > 0 ? Math.min(1, (score / checks) * edgePenalty) : 0;
+  }
+
+  return { returnScores, ddScores, neighborScores, times };
+}
+
+/**
+ * Select top N candidate times for WF testing.
+ * Filters to positive improvement, scores on 3-axis base composite, takes top N.
+ */
+function selectWFCandidates(timeResults, baseScores, testTimes, maxCandidates = 10) {
+  const { returnScores, ddScores, neighborScores, times } = baseScores;
+  const weights = { ret: 0.40, dd: 0.25, neighbor: 0.35 };
+  const eligible = times.filter(t => timeResults[t] && timeResults[t].improvement > 0);
+  const scored = eligible.map(t => ({
+    time: t,
+    base: (returnScores[t] || 0) * weights.ret + (ddScores[t] || 0) * weights.dd + (neighborScores[t] || 0) * weights.neighbor
+  }));
+  scored.sort((a, b) => b.base - a.base);
+  return scored.slice(0, maxCandidates).map(s => s.time);
+}
+
+/**
+ * Tier 1: Robustness Check — runs computeWalkforward on candidates only.
+ */
+function computeRobustnessCheck(eodResult, timeResults, candidates, tradingDays, wfWindowSize, wfStepSize) {
+  const allWalkforwardResults = {};
+  const robustnessScores = {};
+  const eodCurve = eodResult.equityCurve;
+
+  for (const t of candidates) {
+    const altCurve = timeResults[t].equityCurve;
+    if (!eodCurve || !altCurve) { robustnessScores[t] = 0; continue; }
+    const dailyReturns = deriveDailyReturns(eodCurve, altCurve, tradingDays);
+    const wf = computeWalkforward(dailyReturns, wfWindowSize, wfStepSize);
+    allWalkforwardResults[t] = wf;
+
+    if (wf.summary.verdict === 'INSUFFICIENT_DATA') { robustnessScores[t] = 0; continue; }
+
+    let winRateScore = 0;
+    if (wf.summary.winRate >= 0.70) winRateScore = 0.5;
+    else if (wf.summary.winRate >= 0.40) winRateScore = 0.2 + 0.3 * ((wf.summary.winRate - 0.40) / 0.30);
+
+    let alphaScore = 0;
+    if (wf.summary.avgAlpha > 0) {
+      alphaScore = Math.min(0.3, wf.summary.avgAlpha / 5 * 0.3);
+    }
+
+    let recentScore = 0;
+    if (wf.summary.total >= 3) {
+      const recentWinRate = wf.summary.recentWins / Math.min(3, wf.summary.total);
+      recentScore = recentWinRate * 0.2;
+    } else {
+      recentScore = wf.summary.winRate * 0.1;
+    }
+
+    robustnessScores[t] = Math.min(1, winRateScore + alphaScore + recentScore);
+  }
+
+  return { allWalkforwardResults, robustnessScores };
+}
+
+/**
+ * Compute OOS scores (0-1) from per-candidate OOS data, using same formula as robustness.
+ */
+function computeOOSScores(perCandidateOOS, candidates) {
+  const oosScores = {};
+  for (const t of candidates) {
+    const c = perCandidateOOS[t];
+    if (!c || c.windows.length === 0) { oosScores[t] = 0; continue; }
+
+    let winRateScore = 0;
+    if (c.winRate >= 0.70) winRateScore = 0.5;
+    else if (c.winRate >= 0.40) winRateScore = 0.2 + 0.3 * ((c.winRate - 0.40) / 0.30);
+
+    let alphaScore = 0;
+    if (c.avgAlpha > 0) {
+      alphaScore = Math.min(0.3, c.avgAlpha / 5 * 0.3);
+    }
+
+    let recentScore = 0;
+    const recentWindows = c.windows.slice(-3);
+    const recentWins = recentWindows.filter(w => w.win).length;
+    if (c.windows.length >= 3) {
+      recentScore = (recentWins / 3) * 0.2;
+    } else {
+      recentScore = c.winRate * 0.1;
+    }
+
+    oosScores[t] = Math.min(1, winRateScore + alphaScore + recentScore);
+  }
+  return oosScores;
+}
+
+/**
+ * Compute final composite scores with dynamic weights based on which tiers are enabled.
+ */
+function computeFinalScores(timeResults, baseScores, robustnessScores, oosScores, candidates, tier1Enabled, tier2Enabled) {
+  const { returnScores, ddScores, neighborScores } = baseScores;
+
+  let weights;
+  if (tier1Enabled && tier2Enabled) {
+    weights = { ret: 0.25, dd: 0.15, neighbor: 0.20, robustness: 0.20, walkforward: 0.20 };
+  } else if (tier1Enabled) {
+    weights = { ret: 0.30, dd: 0.20, neighbor: 0.25, robustness: 0.25, walkforward: 0.00 };
+  } else if (tier2Enabled) {
+    weights = { ret: 0.30, dd: 0.20, neighbor: 0.25, robustness: 0.00, walkforward: 0.25 };
+  } else {
+    weights = { ret: 0.40, dd: 0.25, neighbor: 0.35, robustness: 0.00, walkforward: 0.00 };
+  }
+
+  const compositeScores = {};
+  let bestTime = null;
+  let bestTotal = -Infinity;
+
+  // Score only candidates (times with positive improvement that passed filtering)
+  const scoreTimes = candidates.length > 0 ? candidates : baseScores.times;
+
+  for (const t of scoreTimes) {
+    const rs = returnScores[t] || 0;
+    const ds = ddScores[t] || 0;
+    const ns = neighborScores[t] || 0;
+    const rbS = tier1Enabled ? (robustnessScores[t] || 0) : 0;
+    const wfS = tier2Enabled ? (oosScores[t] || 0) : 0;
+
+    const total = Math.round((rs * weights.ret + ds * weights.dd + ns * weights.neighbor
+                             + rbS * weights.robustness + wfS * weights.walkforward) * 100);
+
+    compositeScores[t] = {
+      total,
+      returnScore: Math.round(rs * 100),
+      ddScore: Math.round(ds * 100),
+      neighborScore: Math.round(ns * 100),
+      robustnessScore: tier1Enabled ? Math.round(rbS * 100) : null,
+      wfScore: tier2Enabled ? Math.round(wfS * 100) : null
+    };
+
+    if (total > bestTotal) {
+      bestTotal = total;
+      bestTime = t;
+    }
+  }
+
+  return { compositeScores, bestTime, bestImprovement: bestTime && timeResults[bestTime] ? timeResults[bestTime].improvement : 0 };
+}
+
+// ============================================================================
+// WALK-FORWARD TEST (Tier 2 — True Out-of-Sample)
+// ============================================================================
+
+/**
+ * True out-of-sample walk-forward: train on past data to pick best time,
+ * test on the next unseen window. Simulates real-time decision-making.
+ *
+ * @param {Object} score - Strategy tree from getSymphony
+ * @param {Object} dailyData - Daily price data by ticker
+ * @param {Object} intradayData - Intraday price data by ticker
+ * @param {string[]} tradingDays - Full sorted array of trading days
+ * @param {string[]} candidateTimes - Top candidate times from selectOOSCandidates
+ * @param {Function} runBacktestFn - One of runDualTimeBacktest, runSingleTimeBacktest, runCashTimeBacktest
+ * @param {number|null} rbThreshold - Rebalance threshold
+ * @param {number} trainWindowSize - Training window in trading days (default 63)
+ * @param {number} stepSize - Test window / step size (default 21)
+ * @param {Object} fullTimeResults - Full-period timeResults for neighbor peak display
+ * @param {string[]} allTestTimes - CONFIG.TEST_TIMES for neighbor lookup
+ */
+function runOOSWalkforward(score, dailyData, intradayData, tradingDays,
+  candidateTimes, runBacktestFn, rbThreshold, trainWindowSize, stepSize, fullTimeResults, allTestTimes) {
+
+  const minRequired = trainWindowSize + stepSize;
+  if (tradingDays.length < minRequired || candidateTimes.length === 0) {
+    return {
+      windows: [],
+      neighborPeak: {},
+      summary: {
+        oosWinRate: 0, oosAvgAlpha: 0, oosAnnAlpha: null,
+        oosBestTime: null, fullBTBestTime: null,
+        degradationRatio: null, wins: 0, total: 0,
+        verdict: 'INSUFFICIENT_DATA'
+      },
+      candidateTimes
+    };
+  }
+
+  const windows = [];
+
+  for (let start = 0; start + trainWindowSize + stepSize <= tradingDays.length; start += stepSize) {
+    const trainDays = tradingDays.slice(start, start + trainWindowSize);
+    const testDays = tradingDays.slice(start + trainWindowSize, start + trainWindowSize + stepSize);
+
+    if (testDays.length === 0) break;
+
+    // TRAIN: run backtest for each candidate time on trainDays
+    const trainEOD = runEODOnlyBacktest(score, dailyData, intradayData, trainDays, rbThreshold);
+    const trainResults = {};
+
+    for (const time of candidateTimes) {
+      const r = runBacktestFn(score, dailyData, intradayData, trainDays, time, rbThreshold);
+      trainResults[time] = {
+        cumReturn: r.cumReturn,
+        annReturn: annualizedReturn(r.cumReturn, r.tradingDays),
+        maxDD: r.maxDD,
+        improvement: r.cumReturn - trainEOD.cumReturn,
+        equityCurve: r.equityCurve
+      };
+    }
+
+    // SELECTION: pick best time from training data (no nested WF)
+    const trainSelection = selectBestTime(trainResults, trainEOD, trainDays,
+      candidateTimes, false, 21, 21);
+    const chosenTime = trainSelection.bestTime;
+
+    if (!chosenTime) continue;
+
+    // TEST: run backtest for ONLY the chosen time on testDays
+    const testEOD = runEODOnlyBacktest(score, dailyData, intradayData, testDays, rbThreshold);
+    const testResult = runBacktestFn(score, dailyData, intradayData, testDays, chosenTime, rbThreshold);
+    const testAlpha = testResult.cumReturn - testEOD.cumReturn;
+
+    windows.push({
+      trainStart: trainDays[0],
+      trainEnd: trainDays[trainDays.length - 1],
+      trainBestTime: chosenTime,
+      testStart: testDays[0],
+      testEnd: testDays[testDays.length - 1],
+      testAlpha,
+      win: testAlpha > 0
+    });
+  }
+
+  if (windows.length === 0) {
+    return {
+      windows: [],
+      neighborPeak: {},
+      summary: {
+        oosWinRate: 0, oosAvgAlpha: 0, oosAnnAlpha: null,
+        oosBestTime: null, fullBTBestTime: null,
+        degradationRatio: null, wins: 0, total: 0,
+        verdict: 'INSUFFICIENT_DATA'
+      },
+      candidateTimes
+    };
+  }
+
+  // Compute summary stats
+  const wins = windows.filter(w => w.win).length;
+  const oosWinRate = wins / windows.length;
+  const oosAvgAlpha = windows.reduce((sum, w) => sum + w.testAlpha, 0) / windows.length;
+
+  // Annualize: compound the per-window alphas
+  let oosCompounded = 1;
+  for (const w of windows) {
+    oosCompounded *= (1 + w.testAlpha / 100);
+  }
+  const oosCumReturn = (oosCompounded - 1) * 100;
+  const oosAnnAlpha = annualizedReturn(oosCumReturn, windows.length * stepSize);
+
+  // Most frequently chosen time
+  const timeCounts = {};
+  for (const w of windows) {
+    timeCounts[w.trainBestTime] = (timeCounts[w.trainBestTime] || 0) + 1;
+  }
+  const oosBestTime = Object.entries(timeCounts).sort((a, b) => b[1] - a[1])[0][0];
+  const oosBestTimeCount = timeCounts[oosBestTime];
+
+  // Full-BT best time (highest composite score among candidates)
+  const fullBTBestTime = candidateTimes[0]; // already sorted by composite score
+  const fullBTImprovement = fullTimeResults[fullBTBestTime] ? fullTimeResults[fullBTBestTime].improvement : 0;
+  const fullBTAnnAlpha = annualizedReturn(fullBTImprovement, tradingDays.length);
+
+  // Degradation ratio
+  const degradationRatio = fullBTAnnAlpha && fullBTAnnAlpha > 0
+    ? (oosAnnAlpha || 0) / fullBTAnnAlpha : null;
+
+  // Verdict
+  let verdict;
+  if (oosWinRate >= 0.65 && oosAvgAlpha > 0) {
+    verdict = 'OOS_CONFIRMED';
+  } else if (oosWinRate >= 0.40 || oosAvgAlpha > 0) {
+    verdict = 'OOS_DEGRADED';
+  } else {
+    verdict = 'OOS_FAILED';
+  }
+
+  // Neighbor peak: show oosBestTime ± 1-2 neighbors from allTestTimes
+  const neighborPeak = {};
+  const oosBestIdx = allTestTimes.indexOf(oosBestTime);
+  const peakTimes = new Set();
+  for (let offset = -2; offset <= 2; offset++) {
+    const ni = oosBestIdx + offset;
+    if (ni >= 0 && ni < allTestTimes.length) {
+      peakTimes.add(allTestTimes[ni]);
+    }
+  }
+
+  // Per-candidate OOS stats for neighbor peak
+  const candidateOOSStats = {};
+  for (const t of candidateTimes) {
+    const tWindows = windows.filter(w => w.trainBestTime === t);
+    // Also count total windows where this time was available (all of them, since it's a candidate)
+    const tTestWindows = windows; // all windows tested against this candidate pool
+    // For per-time OOS alpha: average test alpha across windows where this time was chosen
+    if (tWindows.length > 0) {
+      candidateOOSStats[t] = {
+        oosWinRate: tWindows.filter(w => w.win).length / tWindows.length,
+        oosAvgAlpha: tWindows.reduce((s, w) => s + w.testAlpha, 0) / tWindows.length,
+        timesChosen: tWindows.length
+      };
+    }
+  }
+
+  for (const t of peakTimes) {
+    neighborPeak[t] = {
+      fullBTImprovement: fullTimeResults[t] ? fullTimeResults[t].improvement : null,
+      isOOSBest: t === oosBestTime,
+      isCandidate: candidateTimes.includes(t),
+      ...(candidateOOSStats[t] || { oosWinRate: null, oosAvgAlpha: null, timesChosen: 0 })
+    };
+  }
+
+  // Per-candidate independent OOS: test each candidate on each window independently
+  const perCandidateOOS = {};
+  for (const t of candidateTimes) {
+    const cWindows = [];
+    for (let start = 0; start + trainWindowSize + stepSize <= tradingDays.length; start += stepSize) {
+      const testDays = tradingDays.slice(start + trainWindowSize, start + trainWindowSize + stepSize);
+      if (testDays.length === 0) break;
+      const testEOD = runEODOnlyBacktest(score, dailyData, intradayData, testDays, rbThreshold);
+      const testResult = runBacktestFn(score, dailyData, intradayData, testDays, t, rbThreshold);
+      const testAlpha = testResult.cumReturn - testEOD.cumReturn;
+      const windowIdx = Math.floor(start / stepSize);
+      const chosenInTraining = windows[windowIdx] ? windows[windowIdx].trainBestTime : null;
+      cWindows.push({
+        testStart: testDays[0],
+        testEnd: testDays[testDays.length - 1],
+        testAlpha,
+        win: testAlpha > 0,
+        chosenInTraining
+      });
+    }
+    const cWins = cWindows.filter(w => w.win).length;
+    perCandidateOOS[t] = {
+      windows: cWindows,
+      winRate: cWindows.length > 0 ? cWins / cWindows.length : 0,
+      avgAlpha: cWindows.length > 0 ? cWindows.reduce((s, w) => s + w.testAlpha, 0) / cWindows.length : 0,
+      timesChosenInTraining: cWindows.filter(w => w.chosenInTraining === t).length
+    };
+  }
+
+  return {
+    windows,
+    neighborPeak,
+    perCandidateOOS,
+    summary: {
+      oosWinRate,
+      oosAvgAlpha,
+      oosAnnAlpha,
+      oosBestTime,
+      oosBestTimeCount,
+      fullBTBestTime,
+      fullBTAnnAlpha,
+      degradationRatio,
+      wins,
+      total: windows.length,
+      verdict
+    },
+    candidateTimes
+  };
+}
+
 /**
  * Prints walk-forward consistency results to console.
  * @param {Object} wfResult - Output from computeWalkforward()
@@ -3625,7 +4726,7 @@ function printWalkforwardResults(wfResult, strategyName, altLabel) {
     return;
   }
 
-  console.log(`  WALK-FORWARD CONSISTENCY (${CONFIG.wfWindowSize}-day windows, step=${CONFIG.wfStepSize}d)`);
+  console.log(`  ROBUSTNESS CHECK (post-hoc slicing, ${CONFIG.wfWindowSize}-day windows, step=${CONFIG.wfStepSize}d)`);
   console.log('  ┌──────────────────────────┬──────────┬──────────┬──────────┐');
   console.log(`  │  Period                  │  EOD     │  ${altLabel.padEnd(7).slice(0, 7)} │  Alpha   │`);
   console.log('  ├──────────────────────────┼──────────┼──────────┼──────────┤');
@@ -3645,7 +4746,13 @@ function printWalkforwardResults(wfResult, strategyName, altLabel) {
   const verdictColors = { CONSISTENT: '(GOOD)', EPISODIC: '(MIXED)', OVERFITTED: '(BAD)' };
   console.log(`  VERDICT: ${summary.verdict} ${verdictColors[summary.verdict] || ''}`);
   console.log(`  Win rate: ${summary.wins}/${summary.total} = ${(summary.winRate * 100).toFixed(1)}% of windows`);
-  console.log(`  Avg alpha per window: ${summary.avgAlpha >= 0 ? '+' : ''}${summary.avgAlpha.toFixed(2)}%`);
+  // Annualize the avg alpha: compound per-window alphas
+  let rcCompounded = 1;
+  for (const w of windows) { rcCompounded *= (1 + w.alpha / 100); }
+  const rcCumAlpha = (rcCompounded - 1) * 100;
+  const rcAnnAlpha = annualizedReturn(rcCumAlpha, windows.length * CONFIG.wfStepSize);
+  const rcAnnStr = rcAnnAlpha != null ? `  |  Annualized: ${rcAnnAlpha >= 0 ? '+' : ''}${rcAnnAlpha.toFixed(1)}%` : '';
+  console.log(`  Avg alpha per window: ${summary.avgAlpha >= 0 ? '+' : ''}${summary.avgAlpha.toFixed(2)}%${rcAnnStr}`);
   console.log(`  Best window:  ${summary.bestWindow.startDate} -> ${summary.bestWindow.endDate.slice(5)} (${summary.bestWindow.alpha >= 0 ? '+' : ''}${summary.bestWindow.alpha.toFixed(1)}%)`);
   console.log(`  Worst window: ${summary.worstWindow.startDate} -> ${summary.worstWindow.endDate.slice(5)} (${summary.worstWindow.alpha >= 0 ? '+' : ''}${summary.worstWindow.alpha.toFixed(1)}%)`);
 
@@ -3661,6 +4768,78 @@ function printWalkforwardResults(wfResult, strategyName, altLabel) {
   } else {
     console.log('  -> Alpha concentrated in few windows - likely curve-fitted');
   }
+  console.log('');
+}
+
+/**
+ * Prints OOS walk-forward results (Tier 2) to console.
+ */
+function printOOSWalkforwardResults(oosResult, strategyName) {
+  if (!oosResult) return;
+  const { windows, neighborPeak, summary, candidateTimes } = oosResult;
+
+  if (summary.verdict === 'INSUFFICIENT_DATA') {
+    console.log(`  OOS WALK-FORWARD: Not enough data (need ${CONFIG.oosTrainWindowSize + CONFIG.oosStepSize}+ trading days)\n`);
+    return;
+  }
+
+  console.log(`  WALK-FORWARD TEST (true OOS, ${CONFIG.oosTrainWindowSize}-day train / ${CONFIG.oosStepSize}-day test)`);
+  console.log(`  Candidates tested: ${candidateTimes.join(', ')}`);
+  console.log('  ┌──────────────────────────┬──────────┬──────────────────────────┬──────────┬───────┐');
+  console.log('  │  Training Period          │  Chosen  │  Test Period              │  Alpha   │ Win?  │');
+  console.log('  ├──────────────────────────┼──────────┼──────────────────────────┼──────────┼───────┤');
+
+  for (const w of windows) {
+    const trainP = `${w.trainStart} -> ${w.trainEnd.slice(5)}`;
+    const testP = `${w.testStart} -> ${w.testEnd.slice(5)}`;
+    const alpha = `${w.testAlpha >= 0 ? '+' : ''}${w.testAlpha.toFixed(1)}%`;
+    const marker = w.win ? '  +  ' : '  -  ';
+    console.log(`  │  ${trainP.padEnd(24)} │  ${w.trainBestTime.padEnd(7)} │  ${testP.padEnd(24)} │ ${alpha.padStart(8)} │${marker}│`);
+  }
+
+  console.log('  └──────────────────────────┴──────────┴──────────────────────────┴──────────┴───────┘\n');
+
+  // Verdict
+  const verdictLabels = { OOS_CONFIRMED: '(CONFIRMED)', OOS_DEGRADED: '(DEGRADED)', OOS_FAILED: '(FAILED)' };
+  console.log(`  OOS VERDICT: ${summary.verdict} ${verdictLabels[summary.verdict] || ''}`);
+  console.log(`  Win rate: ${summary.wins}/${summary.total} = ${(summary.oosWinRate * 100).toFixed(1)}% of out-of-sample windows`);
+  console.log(`  Avg OOS alpha per window: ${summary.oosAvgAlpha >= 0 ? '+' : ''}${summary.oosAvgAlpha.toFixed(2)}%  |  Annualized: ${summary.oosAnnAlpha != null ? `${summary.oosAnnAlpha >= 0 ? '+' : ''}${summary.oosAnnAlpha.toFixed(1)}%` : 'n/a'}`);
+  console.log(`  Most selected time in training: ${summary.oosBestTime} (${summary.oosBestTimeCount}/${summary.total} windows)`);
+
+  // Comparison vs full backtest
+  console.log('');
+  console.log('  COMPARISON vs Full Backtest:');
+  const fullBTStr = summary.fullBTAnnAlpha != null ? `${summary.fullBTAnnAlpha >= 0 ? '+' : ''}${summary.fullBTAnnAlpha.toFixed(1)}%` : 'n/a';
+  const oosStr = summary.oosAnnAlpha != null ? `${summary.oosAnnAlpha >= 0 ? '+' : ''}${summary.oosAnnAlpha.toFixed(1)}%` : 'n/a';
+  console.log(`  Full BT  @ ${summary.fullBTBestTime}: ${fullBTStr} ann. improvement`);
+  console.log(`  OOS avg  @ ${summary.oosBestTime}: ${oosStr} ann. improvement`);
+  if (summary.degradationRatio != null) {
+    const ratio = summary.degradationRatio;
+    const label = ratio >= 0.75 ? 'EXCELLENT' : ratio >= 0.50 ? 'ACCEPTABLE' : ratio >= 0.25 ? 'SIGNIFICANT' : 'SEVERE';
+    console.log(`  Degradation ratio: ${ratio.toFixed(2)} -- ${label}`);
+  }
+
+  // Neighbor robustness peak
+  if (Object.keys(neighborPeak).length > 0) {
+    console.log('');
+    console.log('  ROBUSTNESS PEAK (OOS best time +/- neighbors):');
+    const peakTimes = Object.keys(neighborPeak).sort();
+    for (const t of peakTimes) {
+      const p = neighborPeak[t];
+      const fullBT = p.fullBTImprovement != null ? `full BT ${p.fullBTImprovement >= 0 ? '+' : ''}${p.fullBTImprovement.toFixed(1)}%` : 'full BT n/a';
+      let oosInfo = '';
+      if (p.isCandidate && p.timesChosen > 0) {
+        oosInfo = `  OOS ${p.oosAvgAlpha >= 0 ? '+' : ''}${p.oosAvgAlpha.toFixed(1)}% (${p.timesChosen}x chosen)`;
+      } else if (p.isCandidate) {
+        oosInfo = '  OOS: never chosen';
+      } else {
+        oosInfo = '  OOS: not tested';
+      }
+      const marker = p.isOOSBest ? ' <-- OOS BEST' : '';
+      console.log(`    ${t}:  ${fullBT}${oosInfo}${marker}`);
+    }
+  }
+
   console.log('');
 }
 
@@ -3708,7 +4887,22 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
       getAssetsWithWeights(score, dailyData, intradayData, lastDay, CONFIG.EOD_TIME, 1.0, true);
 
       const _tStart = Date.now();
-      const eodResult = runEODOnlyBacktest(score, dailyData, intradayData, tradingDays, rbThreshold);
+      let eodResult;
+      let baselineSource = 'simulated';
+      if (CONFIG.composerBaseline && hasComposerKeys()) {
+        if (!quiet) console.log('  Fetching Composer baseline holdings...');
+        const composerHoldings = await fetchComposerBaselineHoldings(id, tradingDays[0], tradingDays[tradingDays.length - 1]);
+        if (composerHoldings) {
+          eodResult = runComposerBaselineBacktest(composerHoldings, dailyData, intradayData, tradingDays);
+          baselineSource = 'composer';
+          if (!quiet) console.log(`  Composer baseline: ${Object.keys(composerHoldings.holdingsByDate).length} days of holdings`);
+        } else {
+          if (!quiet) console.log('  Composer baseline unavailable, falling back to simulated EOD');
+          eodResult = runEODOnlyBacktest(score, dailyData, intradayData, tradingDays, rbThreshold);
+        }
+      } else {
+        eodResult = runEODOnlyBacktest(score, dailyData, intradayData, tradingDays, rbThreshold);
+      }
 
       const timeResults = {};
 
@@ -3718,6 +4912,7 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
 
         timeResults[time] = {
           cumReturn: dualResult.cumReturn,
+          annReturn: annualizedReturn(dualResult.cumReturn, dualResult.tradingDays),
           maxDD: dualResult.maxDD,
           improvement,
           equityCurve: dualResult.equityCurve
@@ -3732,17 +4927,45 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
         printDiagnostics();
       }
 
-      // Composite best-time selection (with WF for all times when enabled)
-      if (!quiet && CONFIG.walkforward) console.log(`  Computing walk-forward for all ${CONFIG.TEST_TIMES.length} times...`);
-      const selection = selectBestTime(timeResults, eodResult, tradingDays,
-        CONFIG.TEST_TIMES, CONFIG.walkforward, CONFIG.wfWindowSize, CONFIG.wfStepSize);
+      // Phase 1: Base scores for all times (3 axes, no WF)
+      const baseScores = computeBaseScores(timeResults, eodResult, CONFIG.TEST_TIMES);
+
+      // Phase 2: Select top candidates for WF testing
+      const candidates = selectWFCandidates(timeResults, baseScores, CONFIG.TEST_TIMES, CONFIG.wfMaxCandidates);
+
+      // Phase 3a: Robustness Check (Tier 1) — candidates only
+      let allWalkforwardResults = {};
+      let robustnessScores = {};
+      if (CONFIG.walkforward && candidates.length > 0) {
+        if (!quiet) console.log(`  Computing Robustness Check on ${candidates.length} candidates...`);
+        const rcResult = computeRobustnessCheck(eodResult, timeResults, candidates, tradingDays,
+          CONFIG.wfWindowSize, CONFIG.wfStepSize);
+        allWalkforwardResults = rcResult.allWalkforwardResults;
+        robustnessScores = rcResult.robustnessScores;
+      }
+
+      // Phase 3b: Walk-Forward Test (Tier 2) — candidates only
+      let oosWalkforward = null;
+      let oosScores = {};
+      if (CONFIG.oosWalkforward && candidates.length > 0) {
+        if (!quiet) console.log(`  Computing Walk-Forward Test on ${candidates.length} candidates...`);
+        oosWalkforward = runOOSWalkforward(score, dailyData, intradayData, tradingDays,
+          candidates, runDualTimeBacktest, rbThreshold,
+          CONFIG.oosTrainWindowSize, CONFIG.oosStepSize, timeResults, CONFIG.TEST_TIMES);
+        if (oosWalkforward && oosWalkforward.perCandidateOOS) {
+          oosScores = computeOOSScores(oosWalkforward.perCandidateOOS, candidates);
+        }
+      }
+
+      // Phase 4: Final composite scoring
+      const { compositeScores, bestTime, bestImprovement } = computeFinalScores(
+        timeResults, baseScores, robustnessScores, oosScores, candidates,
+        CONFIG.walkforward, CONFIG.oosWalkforward);
       const _tWF = Date.now();
       const _shortName = name.length > 30 ? name.slice(0, 27) + '...' : name;
-      console.log(`  [DUAL] ${_shortName} — ${CONFIG.TEST_TIMES.length} backtests ${((_tBacktest - _tStart)/1000).toFixed(1)}s, scoring+WF ${((_tWF - _tBacktest)/1000).toFixed(1)}s, total ${((_tWF - _tStart)/1000).toFixed(1)}s`);
-      const bestTime = selection.bestTime;
-      const bestImprovement = selection.bestImprovement;
-      let walkforward = selection.walkforwardResults[bestTime] || null;
-      const allWalkforwardResults = selection.walkforwardResults || {};
+      const _tierLabel = CONFIG.walkforward && CONFIG.oosWalkforward ? 'RC+OOS' : CONFIG.walkforward ? 'RC' : CONFIG.oosWalkforward ? 'OOS' : '';
+      console.log(`  [DUAL] ${_shortName} — ${CONFIG.TEST_TIMES.length} backtests ${((_tBacktest - _tStart)/1000).toFixed(1)}s, scoring${_tierLabel ? '+' + _tierLabel : ''} ${((_tWF - _tBacktest)/1000).toFixed(1)}s, total ${((_tWF - _tStart)/1000).toFixed(1)}s`);
+      let walkforward = bestTime && allWalkforwardResults[bestTime] ? allWalkforwardResults[bestTime] : null;
 
       // Strip equityCurves before storing in results
       for (const t of CONFIG.TEST_TIMES) if (timeResults[t]) delete timeResults[t].equityCurve;
@@ -3754,25 +4977,31 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
         dateRange: `${tradingDays[0]} to ${tradingDays[tradingDays.length-1]}`,
         eod: {
           cumReturn: eodResult.cumReturn,
+          annReturn: annualizedReturn(eodResult.cumReturn, eodResult.tradingDays),
           maxDD: eodResult.maxDD
         },
         times: timeResults,
         bestTime,
         bestImprovement,
         recommendation: (() => {
-          const cs = selection.compositeScores && selection.compositeScores[bestTime];
-          const score = cs ? cs.total : 0;
+          const cs = compositeScores && compositeScores[bestTime];
+          const csScore = cs ? cs.total : 0;
           const eodAbs = Math.abs(eodResult.cumReturn);
           const relPct = eodAbs > 1 ? (bestImprovement / eodAbs) * 100 : bestImprovement * 10;
-          if (relPct < 10) return 'STICK_EOD'; // Relative improvement too small
-          if (score >= 60) return 'ADD_MORNING';
-          if (score < 40) return 'STICK_EOD';
+          if (bestImprovement <= 0 || relPct < 10) return 'STICK_EOD';
+          if (csScore >= 60) return 'ADD_MORNING';
+          if (csScore < 40) return 'STICK_EOD';
           return 'MARGINAL';
         })(),
         walkforward,
         allWalkforwardResults,
-        compositeScores: selection.compositeScores,
-        selectionMethod: selection.selectionMethod
+        oosWalkforward,
+        compositeScores,
+        selectionMethod: CONFIG.walkforward && CONFIG.oosWalkforward ? 'composite_with_both'
+          : CONFIG.walkforward ? 'composite_with_robustness'
+          : CONFIG.oosWalkforward ? 'composite_with_walkforward' : 'composite',
+        baselineSource,
+        candidates
       });
 
     } catch (e) {
@@ -3823,7 +5052,22 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
       getAssetsWithWeights(score, dailyData, intradayData, lastDay, CONFIG.EOD_TIME, 1.0, true);
 
       const _tStart = Date.now();
-      const eodResult = runSingleTimeBacktest(score, dailyData, intradayData, tradingDays, CONFIG.EOD_TIME, rbThreshold);
+      let eodResult;
+      let baselineSource = 'simulated';
+      if (CONFIG.composerBaseline && hasComposerKeys()) {
+        if (!quiet) console.log('  Fetching Composer baseline holdings...');
+        const composerHoldings = await fetchComposerBaselineHoldings(id, tradingDays[0], tradingDays[tradingDays.length - 1]);
+        if (composerHoldings) {
+          eodResult = runComposerBaselineBacktest(composerHoldings, dailyData, intradayData, tradingDays);
+          baselineSource = 'composer';
+          if (!quiet) console.log(`  Composer baseline: ${Object.keys(composerHoldings.holdingsByDate).length} days of holdings`);
+        } else {
+          if (!quiet) console.log('  Composer baseline unavailable, falling back to simulated EOD');
+          eodResult = runSingleTimeBacktest(score, dailyData, intradayData, tradingDays, CONFIG.EOD_TIME, rbThreshold);
+        }
+      } else {
+        eodResult = runSingleTimeBacktest(score, dailyData, intradayData, tradingDays, CONFIG.EOD_TIME, rbThreshold);
+      }
 
       const timeResults = {};
 
@@ -3833,6 +5077,7 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
 
         timeResults[time] = {
           cumReturn: result.cumReturn,
+          annReturn: annualizedReturn(result.cumReturn, result.tradingDays),
           maxDD: result.maxDD,
           improvement,
           equityCurve: result.equityCurve
@@ -3847,18 +5092,40 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
         printDiagnostics();
       }
 
-      // Composite best-time selection (with WF for all times when enabled)
-      if (!quiet && CONFIG.walkforward) console.log(`  Computing walk-forward for all ${CONFIG.TEST_TIMES.length} times...`);
-      const selection = selectBestTime(timeResults, eodResult, tradingDays,
-        CONFIG.TEST_TIMES, CONFIG.walkforward, CONFIG.wfWindowSize, CONFIG.wfStepSize);
+      // Phase 1-4: New scoring pipeline (same as dual)
+      const baseScores = computeBaseScores(timeResults, eodResult, CONFIG.TEST_TIMES);
+      const candidates = selectWFCandidates(timeResults, baseScores, CONFIG.TEST_TIMES, CONFIG.wfMaxCandidates);
+
+      let allWalkforwardResults = {};
+      let robustnessScores = {};
+      if (CONFIG.walkforward && candidates.length > 0) {
+        if (!quiet) console.log(`  Computing Robustness Check on ${candidates.length} candidates...`);
+        const rcResult = computeRobustnessCheck(eodResult, timeResults, candidates, tradingDays,
+          CONFIG.wfWindowSize, CONFIG.wfStepSize);
+        allWalkforwardResults = rcResult.allWalkforwardResults;
+        robustnessScores = rcResult.robustnessScores;
+      }
+
+      let oosWalkforward = null;
+      let oosScores = {};
+      if (CONFIG.oosWalkforward && candidates.length > 0) {
+        if (!quiet) console.log(`  Computing Walk-Forward Test on ${candidates.length} candidates...`);
+        oosWalkforward = runOOSWalkforward(score, dailyData, intradayData, tradingDays,
+          candidates, runSingleTimeBacktest, rbThreshold,
+          CONFIG.oosTrainWindowSize, CONFIG.oosStepSize, timeResults, CONFIG.TEST_TIMES);
+        if (oosWalkforward && oosWalkforward.perCandidateOOS) {
+          oosScores = computeOOSScores(oosWalkforward.perCandidateOOS, candidates);
+        }
+      }
+
+      const { compositeScores, bestTime, bestImprovement } = computeFinalScores(
+        timeResults, baseScores, robustnessScores, oosScores, candidates,
+        CONFIG.walkforward, CONFIG.oosWalkforward);
       const _tWF = Date.now();
       const _shortName = name.length > 30 ? name.slice(0, 27) + '...' : name;
-      console.log(`  [SINGLE] ${_shortName} — ${CONFIG.TEST_TIMES.length} backtests ${((_tBacktest - _tStart)/1000).toFixed(1)}s, scoring+WF ${((_tWF - _tBacktest)/1000).toFixed(1)}s, total ${((_tWF - _tStart)/1000).toFixed(1)}s`);
-      const bestTime = selection.bestTime;
-      const bestImprovement = selection.bestImprovement;
-
-      let walkforward = selection.walkforwardResults[bestTime] || null;
-      const allWalkforwardResults = selection.walkforwardResults || {};
+      const _tierLabel = CONFIG.walkforward && CONFIG.oosWalkforward ? 'RC+OOS' : CONFIG.walkforward ? 'RC' : CONFIG.oosWalkforward ? 'OOS' : '';
+      console.log(`  [SINGLE] ${_shortName} — ${CONFIG.TEST_TIMES.length} backtests ${((_tBacktest - _tStart)/1000).toFixed(1)}s, scoring${_tierLabel ? '+' + _tierLabel : ''} ${((_tWF - _tBacktest)/1000).toFixed(1)}s, total ${((_tWF - _tStart)/1000).toFixed(1)}s`);
+      let walkforward = bestTime && allWalkforwardResults[bestTime] ? allWalkforwardResults[bestTime] : null;
 
       // Strip equityCurves before storing in results
       for (const t of CONFIG.TEST_TIMES) if (timeResults[t]) delete timeResults[t].equityCurve;
@@ -3870,23 +5137,190 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
         dateRange: `${tradingDays[0]} to ${tradingDays[tradingDays.length-1]}`,
         eod: {
           cumReturn: eodResult.cumReturn,
+          annReturn: annualizedReturn(eodResult.cumReturn, eodResult.tradingDays),
           maxDD: eodResult.maxDD
         },
         times: timeResults,
         bestTime,
         bestImprovement,
         recommendation: (() => {
-          const cs = selection.compositeScores && selection.compositeScores[bestTime];
-          const score = cs ? cs.total : 0;
+          const cs = compositeScores && compositeScores[bestTime];
+          const csScore = cs ? cs.total : 0;
           const eodAbs = Math.abs(eodResult.cumReturn);
           const relPct = eodAbs > 1 ? (bestImprovement / eodAbs) * 100 : bestImprovement * 10;
-          if (bestTime !== CONFIG.EOD_TIME && relPct >= 10 && score >= 50) return 'USE_MORNING';
+          if (bestImprovement <= 0 || relPct < 10) return 'KEEP_EOD';
+          if (bestTime !== CONFIG.EOD_TIME && csScore >= 50) return 'USE_MORNING';
           return 'KEEP_EOD';
         })(),
         walkforward,
         allWalkforwardResults,
-        compositeScores: selection.compositeScores,
-        selectionMethod: selection.selectionMethod
+        oosWalkforward,
+        compositeScores,
+        selectionMethod: CONFIG.walkforward && CONFIG.oosWalkforward ? 'composite_with_both'
+          : CONFIG.walkforward ? 'composite_with_robustness'
+          : CONFIG.oosWalkforward ? 'composite_with_walkforward' : 'composite',
+        baselineSource,
+        candidates
+      });
+
+    } catch (e) {
+      results.push({ id, name: 'Error', error: e.message });
+    }
+  }
+
+  return results;
+}
+
+async function cashTimeAnalysis(ids, intradayDays, quiet = false) {
+  const results = [];
+  const dailyDays = CONFIG.MAX_DAILY_DAYS;
+
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    DIAGNOSTICS.reset();
+    clearMemoCache(); clearSortedKeysCache();
+    if (!quiet) console.log(`\n[${i + 1}/${ids.length}] Analyzing ${id}...`);
+
+    try {
+      const { score, name, rebalanceConfig } = await getSymphony(id);
+      if (!quiet) console.log(`  Name: ${name}`);
+      const rbThreshold = rebalanceConfig?.threshold ?? null;
+      if (!quiet && rbThreshold !== null) console.log(`  Rebalance: threshold ${(rbThreshold * 100).toFixed(1)}% (not daily)`);
+
+      const tickers = Array.from(extractTickers(score));
+      if (!quiet) console.log(`  Tickers: ${tickers.join(', ')}`);
+
+      const { intradayData, dailyData } = await fetchAllData(tickers, intradayDays, dailyDays, quiet);
+
+      if (Object.keys(intradayData).length === 0) {
+        results.push({ id, name, error: 'No intraday data available' });
+        printDiagnostics();
+        continue;
+      }
+
+      const tradingDays = applyDateRange(getTradingDays(intradayData));
+      if (tradingDays.length < 5) {
+        results.push({ id, name, error: 'Not enough trading days' });
+        continue;
+      }
+
+      if (!quiet) console.log(`  Trading days: ${tradingDays.length} (${tradingDays[0]} to ${tradingDays[tradingDays.length-1]})`);
+
+      // Diagnostic run on the last day
+      const lastDay = tradingDays[tradingDays.length - 1];
+      getAssetsWithWeights(score, dailyData, intradayData, lastDay, CONFIG.EOD_TIME, 1.0, true);
+
+      const _tStart = Date.now();
+      let eodResult;
+      let baselineSource = 'simulated';
+      if (CONFIG.composerBaseline && hasComposerKeys()) {
+        if (!quiet) console.log('  Fetching Composer baseline holdings...');
+        const composerHoldings = await fetchComposerBaselineHoldings(id, tradingDays[0], tradingDays[tradingDays.length - 1]);
+        if (composerHoldings) {
+          eodResult = runComposerBaselineBacktest(composerHoldings, dailyData, intradayData, tradingDays);
+          baselineSource = 'composer';
+          if (!quiet) console.log(`  Composer baseline: ${Object.keys(composerHoldings.holdingsByDate).length} days of holdings`);
+        } else {
+          if (!quiet) console.log('  Composer baseline unavailable, falling back to simulated EOD');
+          eodResult = runEODOnlyBacktest(score, dailyData, intradayData, tradingDays, rbThreshold);
+        }
+      } else {
+        eodResult = runEODOnlyBacktest(score, dailyData, intradayData, tradingDays, rbThreshold);
+      }
+
+      const timeResults = {};
+
+      for (const time of CONFIG.TEST_TIMES) {
+        const cashResult = runCashTimeBacktest(score, dailyData, intradayData, tradingDays, time, rbThreshold);
+        const improvement = cashResult.cumReturn - eodResult.cumReturn;
+
+        timeResults[time] = {
+          cumReturn: cashResult.cumReturn,
+          annReturn: annualizedReturn(cashResult.cumReturn, cashResult.tradingDays),
+          maxDD: cashResult.maxDD,
+          improvement,
+          equityCurve: cashResult.equityCurve
+        };
+      }
+      const _tBacktest = Date.now();
+
+      // Check for no trades
+      const noTrades = Math.abs(eodResult.cumReturn) < 0.01 && Math.abs(eodResult.maxDD) < 0.01;
+      if (noTrades && !quiet) {
+        console.log(`  ⚠️  NO TRADES DETECTED - Strategy returned 0% with 0% drawdown`);
+        printDiagnostics();
+      }
+
+      // Phase 1-4: New scoring pipeline (same as dual/single)
+      const baseScores = computeBaseScores(timeResults, eodResult, CONFIG.TEST_TIMES);
+      const candidates = selectWFCandidates(timeResults, baseScores, CONFIG.TEST_TIMES, CONFIG.wfMaxCandidates);
+
+      let allWalkforwardResults = {};
+      let robustnessScores = {};
+      if (CONFIG.walkforward && candidates.length > 0) {
+        if (!quiet) console.log(`  Computing Robustness Check on ${candidates.length} candidates...`);
+        const rcResult = computeRobustnessCheck(eodResult, timeResults, candidates, tradingDays,
+          CONFIG.wfWindowSize, CONFIG.wfStepSize);
+        allWalkforwardResults = rcResult.allWalkforwardResults;
+        robustnessScores = rcResult.robustnessScores;
+      }
+
+      let oosWalkforward = null;
+      let oosScores = {};
+      if (CONFIG.oosWalkforward && candidates.length > 0) {
+        if (!quiet) console.log(`  Computing Walk-Forward Test on ${candidates.length} candidates...`);
+        oosWalkforward = runOOSWalkforward(score, dailyData, intradayData, tradingDays,
+          candidates, runCashTimeBacktest, rbThreshold,
+          CONFIG.oosTrainWindowSize, CONFIG.oosStepSize, timeResults, CONFIG.TEST_TIMES);
+        if (oosWalkforward && oosWalkforward.perCandidateOOS) {
+          oosScores = computeOOSScores(oosWalkforward.perCandidateOOS, candidates);
+        }
+      }
+
+      const { compositeScores, bestTime, bestImprovement } = computeFinalScores(
+        timeResults, baseScores, robustnessScores, oosScores, candidates,
+        CONFIG.walkforward, CONFIG.oosWalkforward);
+      const _tWF = Date.now();
+      const _shortName = name.length > 30 ? name.slice(0, 27) + '...' : name;
+      const _tierLabel = CONFIG.walkforward && CONFIG.oosWalkforward ? 'RC+OOS' : CONFIG.walkforward ? 'RC' : CONFIG.oosWalkforward ? 'OOS' : '';
+      console.log(`  [CASH] ${_shortName} — ${CONFIG.TEST_TIMES.length} backtests ${((_tBacktest - _tStart)/1000).toFixed(1)}s, scoring${_tierLabel ? '+' + _tierLabel : ''} ${((_tWF - _tBacktest)/1000).toFixed(1)}s, total ${((_tWF - _tStart)/1000).toFixed(1)}s`);
+      let walkforward = bestTime && allWalkforwardResults[bestTime] ? allWalkforwardResults[bestTime] : null;
+
+      // Strip equityCurves before storing in results
+      for (const t of CONFIG.TEST_TIMES) if (timeResults[t]) delete timeResults[t].equityCurve;
+
+      results.push({
+        id,
+        name,
+        tradingDays: eodResult.tradingDays,
+        dateRange: `${tradingDays[0]} to ${tradingDays[tradingDays.length-1]}`,
+        eod: {
+          cumReturn: eodResult.cumReturn,
+          annReturn: annualizedReturn(eodResult.cumReturn, eodResult.tradingDays),
+          maxDD: eodResult.maxDD
+        },
+        times: timeResults,
+        bestTime,
+        bestImprovement,
+        recommendation: (() => {
+          const cs = compositeScores && compositeScores[bestTime];
+          const csScore = cs ? cs.total : 0;
+          const eodAbs = Math.abs(eodResult.cumReturn);
+          const relPct = eodAbs > 1 ? (bestImprovement / eodAbs) * 100 : bestImprovement * 10;
+          if (bestImprovement <= 0 || relPct < 10) return 'STICK_EOD';
+          if (csScore >= 60) return 'GO_CASH';
+          if (csScore < 40) return 'STICK_EOD';
+          return 'MARGINAL';
+        })(),
+        walkforward,
+        allWalkforwardResults,
+        oosWalkforward,
+        compositeScores,
+        selectionMethod: CONFIG.walkforward && CONFIG.oosWalkforward ? 'composite_with_both'
+          : CONFIG.walkforward ? 'composite_with_robustness'
+          : CONFIG.oosWalkforward ? 'composite_with_walkforward' : 'composite',
+        baselineSource,
+        candidates
       });
 
     } catch (e) {
@@ -3900,6 +5334,98 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
 // ============================================================================
 // OUTPUT FORMATTING
 // ============================================================================
+
+function printCashTimeResults(results) {
+  console.log(`\n${'═'.repeat(100)}`);
+  console.log('  CASH-AT-TIME ANALYSIS RESULTS (Go to Cash Midday, Re-enter at EOD)');
+  console.log(`  Question: "If I go to cash at a morning time, then re-enter at ${CONFIG.EOD_TIME} EOD, what is my cumulative return?"`);
+  console.log(`${'═'.repeat(100)}\n`);
+
+  for (const r of results) {
+    if (r.error) {
+      console.log(`${r.name || r.id}: ERROR - ${r.error}\n`);
+      continue;
+    }
+
+    console.log(`${'─'.repeat(100)}`);
+    console.log(`STRATEGY: ${r.name}`);
+    console.log(`ID: ${r.id}`);
+    console.log(`${r.tradingDays} trading days | ${r.dateRange}`);
+    console.log(`${'─'.repeat(100)}`);
+
+    console.log(`\n  CASH-AT-TIME RESULTS (Go cash at time, re-enter at ${CONFIG.EOD_TIME} EOD):`);
+    console.log('  ┌─────────┬─────────────────┬─────────────────┬─────────────────┬─────────────────┐');
+    console.log('  │  Time   │  Ann Return     │  Cum Return     │  Max Drawdown   │  vs EOD-Only    │');
+    console.log('  ├─────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┤');
+
+    // EOD baseline row first
+    const eodAnn = r.eod.annReturn != null ? r.eod.annReturn : annualizedReturn(r.eod.cumReturn, r.tradingDays);
+    const eodAnnStr = eodAnn != null ? `${eodAnn >= 0 ? '+' : ''}${eodAnn.toFixed(1)}%` : '—';
+    const eodRet = `${r.eod.cumReturn >= 0 ? '+' : ''}${r.eod.cumReturn.toFixed(1)}%`;
+    const eodDD = `${r.eod.maxDD.toFixed(1)}%`;
+    const _blSrc = r.baselineSource === 'composer' ? '◀ COMPOSER' : '◀ EOD-ONLY';
+    console.log(`  │  ${CONFIG.EOD_TIME}  │  ${eodAnnStr.padStart(12)}  │  ${eodRet.padStart(12)}  │  ${eodDD.padStart(12)}  │    (baseline)   │ ${_blSrc}`);
+    console.log('  ├─────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┤');
+
+    for (const time of CONFIG.TEST_TIMES) {
+      const t = r.times[time];
+      const tAnn = t.annReturn != null ? t.annReturn : annualizedReturn(t.cumReturn, r.tradingDays);
+      const annStr = tAnn != null ? `${tAnn >= 0 ? '+' : ''}${tAnn.toFixed(1)}%` : '—';
+      const ret = `${t.cumReturn >= 0 ? '+' : ''}${t.cumReturn.toFixed(1)}%`;
+      const dd = `${t.maxDD.toFixed(1)}%`;
+      const imp = `${t.improvement >= 0 ? '+' : ''}${t.improvement.toFixed(1)}%`;
+      const marker = time === r.bestTime ? ' <-- BEST' : '';
+      console.log(`  │  ${time}  │  ${annStr.padStart(12)}  │  ${ret.padStart(12)}  │  ${dd.padStart(12)}  │  ${imp.padStart(12)}  │${marker}`);
+    }
+
+    console.log('  └─────────┴─────────────────┴─────────────────┴─────────────────┴─────────────────┘\n');
+
+    const cashCS = r.compositeScores && r.bestTime && r.compositeScores[r.bestTime];
+    const cashScoreStr = cashCS ? ` (score ${cashCS.total}/100)` : '';
+    if (r.recommendation === 'GO_CASH') {
+      console.log(`  RECOMMENDATION: Consider going to cash at ${r.bestTime}${cashScoreStr} (${r.bestImprovement >= 0 ? '+' : ''}${r.bestImprovement.toFixed(1)}% improvement)`);
+    } else if (r.recommendation === 'STICK_EOD') {
+      console.log(`  RECOMMENDATION: Stick with EOD-only - going to cash midday shows worse results`);
+    } else {
+      console.log(`  RECOMMENDATION: Marginal difference${cashScoreStr} - EOD-only is simpler`);
+    }
+
+    // Composite score breakdown
+    if (cashCS) {
+      const rcPart = cashCS.robustnessScore !== null ? `, RC ${cashCS.robustnessScore}` : '';
+      const oosPart = cashCS.wfScore !== null ? `, OOS ${cashCS.wfScore}` : '';
+      console.log(`  SELECTION: Composite ${cashCS.total}/100 (Return ${cashCS.returnScore}, DD ${cashCS.ddScore}, Neighbors ${cashCS.neighborScore}${rcPart}${oosPart})`);
+    }
+    console.log('');
+
+    if (r.walkforward) {
+      printWalkforwardResults(r.walkforward, r.name, 'Cash');
+    }
+    if (r.oosWalkforward) {
+      printOOSWalkforwardResults(r.oosWalkforward, r.name);
+    }
+  }
+
+  // Summary table for multiple strategies
+  if (results.filter(r => !r.error).length > 1) {
+    console.log(`\n${'═'.repeat(100)}`);
+    console.log('  CASH-AT-TIME SUMMARY');
+    console.log(`${'═'.repeat(100)}\n`);
+
+    const reset = '\x1b[0m';
+    for (const r of results) {
+      if (r.error) continue;
+      const cs = r.compositeScores && r.bestTime && r.compositeScores[r.bestTime];
+      const scoreVal = cs ? cs.total : 0;
+      const q = getCompositeQuality(scoreVal);
+      const impStr = `${r.bestImprovement >= 0 ? '+' : ''}${r.bestImprovement.toFixed(1)}%`;
+      const ddStr = `${r.times[r.bestTime].maxDD.toFixed(1)}%`;
+      const shortName = r.name.length > 40 ? r.name.slice(0, 37) + '...' : r.name;
+      console.log(`  ${shortName.padEnd(42)} Cash@${r.bestTime}  ${q.color}${q.label.padEnd(8)}${reset} ${String(scoreVal).padStart(3)}/100  ${impStr.padStart(8)}  DD ${ddStr.padStart(6)}  ${r.recommendation}`);
+    }
+    console.log('');
+  }
+}
 
 function printDualTimeResults(results) {
   console.log(`\n${'═'.repeat(100)}`);
@@ -3920,26 +5446,31 @@ function printDualTimeResults(results) {
     console.log(`${'─'.repeat(100)}`);
 
     console.log(`\n  DUAL-TIME RESULTS (Morning + ${CONFIG.EOD_TIME} EOD):`);
-    console.log('  ┌─────────┬─────────────────┬─────────────────┬─────────────────┐');
-    console.log('  │  Time   │  Cum Return     │  Max Drawdown   │  vs EOD-Only    │');
-    console.log('  ├─────────┼─────────────────┼─────────────────┼─────────────────┤');
+    console.log('  ┌─────────┬─────────────────┬─────────────────┬─────────────────┬─────────────────┐');
+    console.log('  │  Time   │  Ann Return     │  Cum Return     │  Max Drawdown   │  vs EOD-Only    │');
+    console.log('  ├─────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┤');
 
     // EOD baseline row first
+    const eodAnnDual = r.eod.annReturn != null ? r.eod.annReturn : annualizedReturn(r.eod.cumReturn, r.tradingDays);
+    const eodAnnStr2 = eodAnnDual != null ? `${eodAnnDual >= 0 ? '+' : ''}${eodAnnDual.toFixed(1)}%` : '—';
     const eodRet = `${r.eod.cumReturn >= 0 ? '+' : ''}${r.eod.cumReturn.toFixed(1)}%`;
     const eodDD = `${r.eod.maxDD.toFixed(1)}%`;
-    console.log(`  │  ${CONFIG.EOD_TIME}  │  ${eodRet.padStart(12)}  │  ${eodDD.padStart(12)}  │    (baseline)   │ ◀ EOD-ONLY`);
-    console.log('  ├─────────┼─────────────────┼─────────────────┼─────────────────┤');
+    const _blSrc2 = r.baselineSource === 'composer' ? '◀ COMPOSER' : '◀ EOD-ONLY';
+    console.log(`  │  ${CONFIG.EOD_TIME}  │  ${eodAnnStr2.padStart(12)}  │  ${eodRet.padStart(12)}  │  ${eodDD.padStart(12)}  │    (baseline)   │ ${_blSrc2}`);
+    console.log('  ├─────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┤');
 
     for (const time of CONFIG.TEST_TIMES) {
       const t = r.times[time];
+      const tAnn = t.annReturn != null ? t.annReturn : annualizedReturn(t.cumReturn, r.tradingDays);
+      const annStr = tAnn != null ? `${tAnn >= 0 ? '+' : ''}${tAnn.toFixed(1)}%` : '—';
       const ret = `${t.cumReturn >= 0 ? '+' : ''}${t.cumReturn.toFixed(1)}%`;
       const dd = `${t.maxDD.toFixed(1)}%`;
       const imp = `${t.improvement >= 0 ? '+' : ''}${t.improvement.toFixed(1)}%`;
       const marker = time === r.bestTime ? ' <-- BEST' : '';
-      console.log(`  │  ${time}  │  ${ret.padStart(12)}  │  ${dd.padStart(12)}  │  ${imp.padStart(12)}  │${marker}`);
+      console.log(`  │  ${time}  │  ${annStr.padStart(12)}  │  ${ret.padStart(12)}  │  ${dd.padStart(12)}  │  ${imp.padStart(12)}  │${marker}`);
     }
 
-    console.log('  └─────────┴─────────────────┴─────────────────┴─────────────────┘\n');
+    console.log('  └─────────┴─────────────────┴─────────────────┴─────────────────┴─────────────────┘\n');
 
     const dualCS = r.compositeScores && r.bestTime && r.compositeScores[r.bestTime];
     const dualScoreStr = dualCS ? ` (score ${dualCS.total}/100)` : '';
@@ -3953,17 +5484,21 @@ function printDualTimeResults(results) {
 
     // Composite score breakdown
     if (dualCS) {
-      const wfPart = dualCS.wfScore !== null ? `, WF ${dualCS.wfScore}` : '';
-      console.log(`  SELECTION: Composite ${dualCS.total}/100 (Return ${dualCS.returnScore}, DD ${dualCS.ddScore}, Neighbors ${dualCS.neighborScore}${wfPart})`);
+      const rcPart = dualCS.robustnessScore !== null ? `, RC ${dualCS.robustnessScore}` : '';
+      const oosPart = dualCS.wfScore !== null ? `, OOS ${dualCS.wfScore}` : '';
+      console.log(`  SELECTION: Composite ${dualCS.total}/100 (Return ${dualCS.returnScore}, DD ${dualCS.ddScore}, Neighbors ${dualCS.neighborScore}${rcPart}${oosPart})`);
     }
     console.log('');
 
     if (r.walkforward) {
       printWalkforwardResults(r.walkforward, r.name, 'Dual');
     }
+    if (r.oosWalkforward) {
+      printOOSWalkforwardResults(r.oosWalkforward, r.name);
+    }
 
     if (r.bestImprovement > 0) {
-      console.log(`  TIP: Run "combined ${r.id} --wf" for robustness tier (peak shape + dual/single agreement + WF)\n`);
+      console.log(`  TIP: Run "combined ${r.id} --wf --oos-wf" for full analysis (consistency + OOS walk-forward)\n`);
     }
   }
 
@@ -4082,7 +5617,7 @@ function printDualTimeResults(results) {
 function printSingleTimeResults(results) {
   console.log(`\n${'═'.repeat(100)}`);
   console.log('  SINGLE TIME REPLACEMENT ANALYSIS RESULTS (V3 - Daily Indicators + Intraday Execution)');
-  console.log('  Question: "If I REPLACE 3:45pm with a morning trade, would I do better?"');
+  console.log(`  Question: "If I REPLACE ${CONFIG.EOD_TIME} EOD with a morning trade, would I do better?"`);
   console.log(`${'═'.repeat(100)}\n`);
 
   for (const r of results) {
@@ -4097,23 +5632,28 @@ function printSingleTimeResults(results) {
     console.log(`${r.tradingDays} trading days | ${r.dateRange}`);
     console.log(`${'─'.repeat(100)}`);
 
-    console.log(`\n  DEFAULT EOD (3:45pm):  Return: ${r.eod.cumReturn >= 0 ? '+' : ''}${r.eod.cumReturn.toFixed(1)}%  |  Max DD: ${r.eod.maxDD.toFixed(1)}%\n`);
+    const eodAnnVal = r.eod.annReturn != null ? r.eod.annReturn : annualizedReturn(r.eod.cumReturn, r.tradingDays);
+    const eodAnnStr = eodAnnVal != null ? `${eodAnnVal >= 0 ? '+' : ''}${eodAnnVal.toFixed(1)}% ann.` : '';
+    const eodCumStr = `(${r.eod.cumReturn >= 0 ? '+' : ''}${r.eod.cumReturn.toFixed(1)}% cum.)`;
+    console.log(`\n  DEFAULT EOD (${CONFIG.EOD_TIME}):  Return: ${eodAnnStr} ${eodCumStr}  |  Max DD: ${r.eod.maxDD.toFixed(1)}%\n`);
 
-    console.log('  ALTERNATIVE TIMES (Instead of 3:45pm):');
-    console.log('  ┌─────────┬─────────────────┬─────────────────┬─────────────────┐');
-    console.log('  │  Time   │  Cum Return     │  Max Drawdown   │  vs 3:45pm      │');
-    console.log('  ├─────────┼─────────────────┼─────────────────┼─────────────────┤');
+    console.log(`  ALTERNATIVE TIMES (Instead of ${CONFIG.EOD_TIME}):`);
+    console.log('  ┌─────────┬─────────────────┬─────────────────┬─────────────────┬─────────────────┐');
+    console.log('  │  Time   │  Ann Return     │  Cum Return     │  Max Drawdown   │  vs EOD         │');
+    console.log('  ├─────────┼─────────────────┼─────────────────┼─────────────────┼─────────────────┤');
 
     for (const time of CONFIG.TEST_TIMES) {
       const t = r.times[time];
+      const annVal = t.annReturn != null ? t.annReturn : annualizedReturn(t.cumReturn, r.tradingDays);
+      const annStr = annVal != null ? `${annVal >= 0 ? '+' : ''}${annVal.toFixed(1)}%` : '—';
       const ret = `${t.cumReturn >= 0 ? '+' : ''}${t.cumReturn.toFixed(1)}%`;
       const dd = `${t.maxDD.toFixed(1)}%`;
       const imp = `${t.improvement >= 0 ? '+' : ''}${t.improvement.toFixed(1)}%`;
       const marker = time === r.bestTime && r.bestTime !== CONFIG.EOD_TIME ? ' <-- BEST' : '';
-      console.log(`  │  ${time}  │  ${ret.padStart(12)}  │  ${dd.padStart(12)}  │  ${imp.padStart(12)}  │${marker}`);
+      console.log(`  │  ${time}  │  ${annStr.padStart(12)}  │  ${ret.padStart(12)}  │  ${dd.padStart(12)}  │  ${imp.padStart(12)}  │${marker}`);
     }
 
-    console.log('  └─────────┴─────────────────┴─────────────────┴─────────────────┘\n');
+    console.log('  └─────────┴─────────────────┴─────────────────┴─────────────────┴─────────────────┘\n');
 
     const singleCS = r.compositeScores && r.bestTime && r.compositeScores[r.bestTime];
     const singleScoreStr = singleCS ? ` (score ${singleCS.total}/100)` : '';
@@ -4125,17 +5665,21 @@ function printSingleTimeResults(results) {
 
     // Composite score breakdown
     if (singleCS) {
-      const wfPart = singleCS.wfScore !== null ? `, WF ${singleCS.wfScore}` : '';
-      console.log(`  SELECTION: Composite ${singleCS.total}/100 (Return ${singleCS.returnScore}, DD ${singleCS.ddScore}, Neighbors ${singleCS.neighborScore}${wfPart})`);
+      const rcPart = singleCS.robustnessScore !== null ? `, RC ${singleCS.robustnessScore}` : '';
+      const oosPart = singleCS.wfScore !== null ? `, OOS ${singleCS.wfScore}` : '';
+      console.log(`  SELECTION: Composite ${singleCS.total}/100 (Return ${singleCS.returnScore}, DD ${singleCS.ddScore}, Neighbors ${singleCS.neighborScore}${rcPart}${oosPart})`);
     }
     console.log('');
 
     if (r.walkforward) {
       printWalkforwardResults(r.walkforward, r.name, `@${r.bestTime}`);
     }
+    if (r.oosWalkforward) {
+      printOOSWalkforwardResults(r.oosWalkforward, r.name);
+    }
 
     if (r.bestImprovement > 0) {
-      console.log(`  TIP: Run "combined ${r.id} --wf" for robustness tier (peak shape + dual/single agreement + WF)\n`);
+      console.log(`  TIP: Run "combined ${r.id} --wf --oos-wf" for full analysis (consistency + OOS walk-forward)\n`);
     }
   }
 
@@ -4196,24 +5740,26 @@ function printSingleTimeResults(results) {
     console.log('  SUMMARY');
     console.log(`${'═'.repeat(totalWidth + 4)}\n`);
 
-    // Column order: Strategy | Days | Best Time | DD Chg | EOD-Only | Best | Difference | % Improve
+    // Column order: Strategy | Days | Best Time | DD Chg | EOD Ann | Best Ann | Difference | % Improve
     console.log(`  ┌${'─'.repeat(nameCol)}┬───────┬───────────┬────────┬───────────┬───────────┬────────────┬───────────┐`);
-    console.log(`  │ ${'Strategy'.padEnd(nameCol - 2)} │ Days  │ Best Time │ DD Chg │ EOD-Only  │   Best    │ Difference │ % Improve │`);
+    console.log(`  │ ${'Strategy'.padEnd(nameCol - 2)} │ Days  │ Best Time │ DD Chg │ EOD Ann   │ Best Ann  │ Difference │ % Improve │`);
     console.log(`  ├${'─'.repeat(nameCol)}┼───────┼───────────┼────────┼───────────┼───────────┼────────────┼───────────┤`);
 
     for (let idx = 0; idx < validResults.length; idx++) {
       const r = validResults[idx];
-      const eodRet = r.eod.cumReturn;
-      const bestRet = r.bestTime === CONFIG.EOD_TIME ? r.eod.cumReturn : r.times[r.bestTime].cumReturn;
-      const eod = `${eodRet >= 0 ? '+' : ''}${eodRet.toFixed(0)}%`;
-      const best = `${bestRet >= 0 ? '+' : ''}${bestRet.toFixed(0)}%`;
-      const diff = `${r.bestImprovement >= 0 ? '+' : ''}${r.bestImprovement.toFixed(0)}%`;
-      const pctImprove = eodRet !== 0 ? (r.bestImprovement / Math.abs(eodRet)) * 100 : 0;
+      const eodAnnRet = r.eod.annReturn != null ? r.eod.annReturn : annualizedReturn(r.eod.cumReturn, r.tradingDays);
+      const bestData = r.bestTime === CONFIG.EOD_TIME ? r.eod : r.times[r.bestTime];
+      const bestAnnRet = bestData.annReturn != null ? bestData.annReturn : annualizedReturn(bestData.cumReturn, r.tradingDays);
+      const eod = eodAnnRet != null ? `${eodAnnRet >= 0 ? '+' : ''}${eodAnnRet.toFixed(0)}%` : '—';
+      const best = bestAnnRet != null ? `${bestAnnRet >= 0 ? '+' : ''}${bestAnnRet.toFixed(0)}%` : '—';
+      const annDiff = (eodAnnRet != null && bestAnnRet != null) ? bestAnnRet - eodAnnRet : r.bestImprovement;
+      const diff = `${annDiff >= 0 ? '+' : ''}${annDiff.toFixed(0)}%`;
+      const pctImprove = eodAnnRet != null && eodAnnRet !== 0 ? (annDiff / Math.abs(eodAnnRet)) * 100 : 0;
       const pctStr = `${pctImprove >= 0 ? '+' : ''}${pctImprove.toFixed(1)}%`;
       const bestDD = r.bestTime === CONFIG.EOD_TIME ? r.eod.maxDD : r.times[r.bestTime].maxDD;
       const ddChange = bestDD - r.eod.maxDD;
       const ddChg = `${ddChange >= 0 ? '+' : ''}${ddChange.toFixed(0)}`;
-      const timeStr = r.bestTime;  // Keep colon: "09:30" or "15:45"
+      const timeStr = r.bestTime;
       // Checkmark for >10% relative improvement
       const highlight = pctImprove > 10;
       const marker = highlight ? ' ✓' : '';
@@ -4255,24 +5801,28 @@ function printSingleTimeResults(results) {
 // ============================================================================
 
 async function combinedAnalysis(ids, intradayDays, quiet = false) {
-  // Run both analyses
+  // Run all three analyses
   if (!quiet) console.log('\n  Running DUAL analysis...\n');
   const dualResults = await dualTimeAnalysis(ids, intradayDays, true);
 
   if (!quiet) console.log('\n  Running SINGLE analysis...\n');
   const singleResults = await singleTimeAnalysis(ids, intradayDays, true);
 
+  if (!quiet) console.log('\n  Running CASH analysis...\n');
+  const cashResults = await cashTimeAnalysis(ids, intradayDays, true);
+
   // Combine results
   const combined = [];
   for (let i = 0; i < ids.length; i++) {
     const dual = dualResults[i];
     const single = singleResults[i];
+    const cash = cashResults[i];
 
-    if (dual.error || single.error) {
+    if (dual.error || single.error || cash.error) {
       combined.push({
         id: ids[i],
-        name: dual.name || single.name || 'Unknown',
-        error: dual.error || single.error
+        name: dual.name || single.name || cash.name || 'Unknown',
+        error: dual.error || single.error || cash.error
       });
       continue;
     }
@@ -4282,30 +5832,49 @@ async function combinedAnalysis(ids, intradayDays, quiet = false) {
       name: dual.name,
       tradingDays: dual.tradingDays,
       dateRange: dual.dateRange,
+      baselineSource: dual.baselineSource || 'simulated',
       eod: dual.eod,
       dual: {
         bestTime: dual.bestTime,
         bestReturn: dual.times[dual.bestTime].cumReturn,
+        bestAnnReturn: dual.times[dual.bestTime].annReturn,
         bestDD: dual.times[dual.bestTime].maxDD,
         improvement: dual.bestImprovement,
         recommendation: dual.recommendation,
         times: dual.times,
         walkforward: dual.walkforward || null,
         allWalkforwardResults: dual.allWalkforwardResults || {},
+        oosWalkforward: dual.oosWalkforward || null,
         compositeScores: dual.compositeScores || null,
         selectionMethod: dual.selectionMethod || null
       },
       single: {
         bestTime: single.bestTime,
         bestReturn: single.times[single.bestTime] ? single.times[single.bestTime].cumReturn : single.eod.cumReturn,
+        bestAnnReturn: single.times[single.bestTime] ? single.times[single.bestTime].annReturn : single.eod.annReturn,
         bestDD: single.times[single.bestTime] ? single.times[single.bestTime].maxDD : single.eod.maxDD,
         improvement: single.bestImprovement,
         recommendation: single.recommendation,
         times: single.times,
         walkforward: single.walkforward || null,
         allWalkforwardResults: single.allWalkforwardResults || {},
+        oosWalkforward: single.oosWalkforward || null,
         compositeScores: single.compositeScores || null,
         selectionMethod: single.selectionMethod || null
+      },
+      cash: {
+        bestTime: cash.bestTime,
+        bestReturn: cash.times[cash.bestTime] ? cash.times[cash.bestTime].cumReturn : cash.eod.cumReturn,
+        bestAnnReturn: cash.times[cash.bestTime] ? cash.times[cash.bestTime].annReturn : cash.eod.annReturn,
+        bestDD: cash.times[cash.bestTime] ? cash.times[cash.bestTime].maxDD : cash.eod.maxDD,
+        improvement: cash.bestImprovement,
+        recommendation: cash.recommendation,
+        times: cash.times,
+        walkforward: cash.walkforward || null,
+        allWalkforwardResults: cash.allWalkforwardResults || {},
+        oosWalkforward: cash.oosWalkforward || null,
+        compositeScores: cash.compositeScores || null,
+        selectionMethod: cash.selectionMethod || null
       }
     });
   }
@@ -4315,8 +5884,8 @@ async function combinedAnalysis(ids, intradayDays, quiet = false) {
 
 function printCombinedResults(results) {
   console.log(`\n${'═'.repeat(120)}`);
-  console.log('  COMBINED ANALYSIS RESULTS (V3 - Dual + Single Comparison)');
-  console.log('  Compares: DUAL (morning + EOD) vs SINGLE (replace EOD with different time)');
+  console.log('  COMBINED ANALYSIS RESULTS (Dual + Single + Cash Comparison)');
+  console.log('  Compares: DUAL (morning + EOD) vs SINGLE (replace EOD) vs CASH (go to cash midday, re-enter EOD)');
   console.log(`${'═'.repeat(120)}\n`);
 
   // Detailed results per strategy
@@ -4332,38 +5901,61 @@ function printCombinedResults(results) {
     console.log(`${r.tradingDays} trading days | ${r.dateRange}`);
     console.log(`${'─'.repeat(120)}`);
 
-    console.log(`\n  BASELINE (EOD-Only @ ${CONFIG.EOD_TIME}):  Return: ${r.eod.cumReturn >= 0 ? '+' : ''}${r.eod.cumReturn.toFixed(1)}%  |  Max DD: ${r.eod.maxDD.toFixed(1)}%\n`);
+    const cbAnn = r.eod.annReturn != null ? r.eod.annReturn : annualizedReturn(r.eod.cumReturn, r.tradingDays);
+    const cbAnnStr = cbAnn != null ? `${cbAnn >= 0 ? '+' : ''}${cbAnn.toFixed(1)}% ann.` : '';
+    const cbCumStr = `(${r.eod.cumReturn >= 0 ? '+' : ''}${r.eod.cumReturn.toFixed(1)}% cum.)`;
+    const _blSrc3 = r.dual && r.dual.baselineSource === 'composer' ? 'Composer Backtest' : `EOD-Only @ ${CONFIG.EOD_TIME}`;
+    console.log(`\n  BASELINE (${_blSrc3}):  Return: ${cbAnnStr} ${cbCumStr}  |  Max DD: ${r.eod.maxDD.toFixed(1)}%\n`);
 
     // Composite quality labels for each mode
     const reset = '\x1b[0m';
     const dualCS = (r.dual.compositeScores && r.dual.bestTime && r.dual.compositeScores[r.dual.bestTime]) ? r.dual.compositeScores[r.dual.bestTime] : null;
     const singleCS = (r.single.compositeScores && r.single.bestTime && r.single.compositeScores[r.single.bestTime]) ? r.single.compositeScores[r.single.bestTime] : null;
+    const cashCS = (r.cash && r.cash.compositeScores && r.cash.bestTime && r.cash.compositeScores[r.cash.bestTime]) ? r.cash.compositeScores[r.cash.bestTime] : null;
     if (dualCS) {
       const dq = getCompositeQuality(dualCS.total);
-      const wfP = dualCS.wfScore !== null ? `, WF ${dualCS.wfScore}` : '';
-      console.log(`  DUAL @ ${r.dual.bestTime}:   ${dq.color}${dq.label} ${dualCS.total}/100${reset} (Return ${dualCS.returnScore}, DD ${dualCS.ddScore}, Neighbors ${dualCS.neighborScore}${wfP})`);
+      const rcP = dualCS.robustnessScore !== null ? `, RC ${dualCS.robustnessScore}` : '';
+      const oosP = dualCS.wfScore !== null ? `, OOS ${dualCS.wfScore}` : '';
+      console.log(`  DUAL @ ${r.dual.bestTime}:   ${dq.color}${dq.label} ${dualCS.total}/100${reset} (Return ${dualCS.returnScore}, DD ${dualCS.ddScore}, Neighbors ${dualCS.neighborScore}${rcP}${oosP})`);
     }
     if (singleCS) {
       const sq = getCompositeQuality(singleCS.total);
-      const wfP = singleCS.wfScore !== null ? `, WF ${singleCS.wfScore}` : '';
-      console.log(`  SINGLE @ ${r.single.bestTime}: ${sq.color}${sq.label} ${singleCS.total}/100${reset} (Return ${singleCS.returnScore}, DD ${singleCS.ddScore}, Neighbors ${singleCS.neighborScore}${wfP})`);
+      const rcP = singleCS.robustnessScore !== null ? `, RC ${singleCS.robustnessScore}` : '';
+      const oosP = singleCS.wfScore !== null ? `, OOS ${singleCS.wfScore}` : '';
+      console.log(`  SINGLE @ ${r.single.bestTime}: ${sq.color}${sq.label} ${singleCS.total}/100${reset} (Return ${singleCS.returnScore}, DD ${singleCS.ddScore}, Neighbors ${singleCS.neighborScore}${rcP}${oosP})`);
+    }
+    if (cashCS) {
+      const cq = getCompositeQuality(cashCS.total);
+      const rcP = cashCS.robustnessScore !== null ? `, RC ${cashCS.robustnessScore}` : '';
+      const oosP = cashCS.wfScore !== null ? `, OOS ${cashCS.wfScore}` : '';
+      console.log(`  CASH @ ${r.cash.bestTime}:   ${cq.color}${cq.label} ${cashCS.total}/100${reset} (Return ${cashCS.returnScore}, DD ${cashCS.ddScore}, Neighbors ${cashCS.neighborScore}${rcP}${oosP})`);
     }
     console.log('');
 
     console.log('  COMPARISON:');
     console.log('  ┌─────────────┬─────────────┬─────────────────┬─────────────────┬─────────────────┐');
-    console.log('  │   Mode      │  Best Time  │   Cum Return    │   Max Drawdown  │  vs EOD-Only    │');
+    console.log('  │   Mode      │  Best Time  │   Ann Return    │   Max Drawdown  │  vs EOD-Only    │');
     console.log('  ├─────────────┼─────────────┼─────────────────┼─────────────────┼─────────────────┤');
 
-    const dualRet = `${r.dual.bestReturn >= 0 ? '+' : ''}${r.dual.bestReturn.toFixed(1)}%`;
+    const dualAnnCli = r.dual.bestAnnReturn != null ? r.dual.bestAnnReturn : annualizedReturn(r.dual.bestReturn, r.tradingDays);
+    const dualRet = dualAnnCli != null ? `${dualAnnCli >= 0 ? '+' : ''}${dualAnnCli.toFixed(1)}%` : '—';
     const dualDD = `${r.dual.bestDD.toFixed(1)}%`;
     const dualImp = `${r.dual.improvement >= 0 ? '+' : ''}${r.dual.improvement.toFixed(1)}%`;
     console.log(`  │  DUAL       │    ${r.dual.bestTime}    │  ${dualRet.padStart(12)}  │  ${dualDD.padStart(12)}  │  ${dualImp.padStart(12)}  │`);
 
-    const singleRet = `${r.single.bestReturn >= 0 ? '+' : ''}${r.single.bestReturn.toFixed(1)}%`;
+    const singleAnnCli = r.single.bestAnnReturn != null ? r.single.bestAnnReturn : annualizedReturn(r.single.bestReturn, r.tradingDays);
+    const singleRet = singleAnnCli != null ? `${singleAnnCli >= 0 ? '+' : ''}${singleAnnCli.toFixed(1)}%` : '—';
     const singleDD = `${r.single.bestDD.toFixed(1)}%`;
     const singleImp = `${r.single.improvement >= 0 ? '+' : ''}${r.single.improvement.toFixed(1)}%`;
     console.log(`  │  SINGLE     │    ${r.single.bestTime}    │  ${singleRet.padStart(12)}  │  ${singleDD.padStart(12)}  │  ${singleImp.padStart(12)}  │`);
+
+    if (r.cash) {
+      const cashAnnCli = r.cash.bestAnnReturn != null ? r.cash.bestAnnReturn : annualizedReturn(r.cash.bestReturn, r.tradingDays);
+      const cashRet = cashAnnCli != null ? `${cashAnnCli >= 0 ? '+' : ''}${cashAnnCli.toFixed(1)}%` : '—';
+      const cashDD = `${r.cash.bestDD.toFixed(1)}%`;
+      const cashImp = `${r.cash.improvement >= 0 ? '+' : ''}${r.cash.improvement.toFixed(1)}%`;
+      console.log(`  │  CASH       │    ${r.cash.bestTime}    │  ${cashRet.padStart(12)}  │  ${cashDD.padStart(12)}  │  ${cashImp.padStart(12)}  │`);
+    }
 
     console.log('  └─────────────┴─────────────┴─────────────────┴─────────────────┴─────────────────┘\n');
 
@@ -4379,8 +5971,20 @@ function printCombinedResults(results) {
     if (r.dual.walkforward) {
       printWalkforwardResults(r.dual.walkforward, r.name, 'Dual');
     }
+    if (r.dual.oosWalkforward) {
+      printOOSWalkforwardResults(r.dual.oosWalkforward, r.name);
+    }
     if (r.single.walkforward) {
       printWalkforwardResults(r.single.walkforward, r.name, `@${r.single.bestTime}`);
+    }
+    if (r.single.oosWalkforward) {
+      printOOSWalkforwardResults(r.single.oosWalkforward, r.name);
+    }
+    if (r.cash && r.cash.walkforward) {
+      printWalkforwardResults(r.cash.walkforward, r.name, 'Cash');
+    }
+    if (r.cash && r.cash.oosWalkforward) {
+      printOOSWalkforwardResults(r.cash.oosWalkforward, r.name);
     }
   }
 
@@ -4411,69 +6015,61 @@ function generateCombinedRecommendation(r) {
     ? r.dual.compositeScores[r.dual.bestTime].total : 0;
   const singleScore = (r.single.compositeScores && r.single.bestTime && r.single.compositeScores[r.single.bestTime])
     ? r.single.compositeScores[r.single.bestTime].total : 0;
+  const cashScore = (r.cash && r.cash.compositeScores && r.cash.bestTime && r.cash.compositeScores[r.cash.bestTime])
+    ? r.cash.compositeScores[r.cash.bestTime].total : 0;
 
   const dualDDWorse = r.dual.bestDD > r.eod.maxDD + 5;
   const singleDDWorse = r.single.bestDD > r.eod.maxDD + 5;
+  const cashDDWorse = r.cash && r.cash.bestDD > r.eod.maxDD + 5;
   const dualHasHighDD = r.dual.bestDD > 30;
   const singleHasHighDD = r.single.bestDD > 30;
+  const cashHasHighDD = r.cash && r.cash.bestDD > 30;
 
   // Relative improvement: improvement as % of EOD return (handles negative/zero EOD)
   const eodAbs = Math.abs(r.eod.cumReturn);
   const dualRelPct = eodAbs > 1 ? (r.dual.improvement / eodAbs) * 100 : r.dual.improvement * 10;
   const singleRelPct = eodAbs > 1 ? (r.single.improvement / eodAbs) * 100 : r.single.improvement * 10;
+  const cashRelPct = r.cash ? (eodAbs > 1 ? (r.cash.improvement / eodAbs) * 100 : r.cash.improvement * 10) : -Infinity;
   const REL_THRESHOLD = 10; // Need >= 10% relative improvement to recommend
-
-  // Thresholds — aligned with quality labels (STRONG 75+, GOOD 55+, MARGINAL 40+, WEAK <40)
-  const strongScore = 55;
-  const marginalScore = 40;
 
   let text = '';
   let warning = null;
 
-  // Comparison line always included: shows both modes so user sees the gap
-  const dualLabel = `Dual @${r.dual.bestTime}: ${dualScore}/100, +${r.dual.improvement.toFixed(1)}% (${dualRelPct >= 0 ? '+' : ''}${dualRelPct.toFixed(0)}% rel)`;
-  const singleLabel = `Single @${r.single.bestTime}: ${singleScore}/100, +${r.single.improvement.toFixed(1)}% (${singleRelPct >= 0 ? '+' : ''}${singleRelPct.toFixed(0)}% rel)`;
-  const comparison = `${dualLabel}  vs  ${singleLabel}`;
-
-  // Neither mode passes relative improvement threshold
-  if (dualRelPct < REL_THRESHOLD && singleRelPct < REL_THRESHOLD) {
-    text = `NOT RECOMMENDED - Improvement too small relative to EOD returns. ${comparison}`;
-    return { text, warning };
-  }
+  // Comparison line always included: shows all modes so user sees the gap
+  const dualLabel = `Dual @${r.dual.bestTime}: ${dualScore}/100, ${r.dual.improvement >= 0 ? '+' : ''}${r.dual.improvement.toFixed(1)}% (${dualRelPct >= 0 ? '+' : ''}${dualRelPct.toFixed(0)}% rel)`;
+  const singleLabel = `Single @${r.single.bestTime}: ${singleScore}/100, ${r.single.improvement >= 0 ? '+' : ''}${r.single.improvement.toFixed(1)}% (${singleRelPct >= 0 ? '+' : ''}${singleRelPct.toFixed(0)}% rel)`;
+  const cashLabel = r.cash ? `Cash @${r.cash.bestTime}: ${cashScore}/100, ${r.cash.improvement >= 0 ? '+' : ''}${r.cash.improvement.toFixed(1)}% (${cashRelPct >= 0 ? '+' : ''}${cashRelPct.toFixed(0)}% rel)` : '';
+  const comparison = cashLabel ? `${dualLabel}  vs  ${singleLabel}  vs  ${cashLabel}` : `${dualLabel}  vs  ${singleLabel}`;
 
   // Determine viability: must pass relative threshold
   const dualViable = dualRelPct >= REL_THRESHOLD;
   const singleViable = singleRelPct >= REL_THRESHOLD;
+  const cashViable = cashRelPct >= REL_THRESHOLD;
 
-  // Pick the mode with higher composite score (if viable)
-  let preferDual = false;
-  let preferSingle = false;
-
-  if (dualViable && singleViable) {
-    if (dualScore > singleScore + 5) preferDual = true;
-    else if (singleScore > dualScore + 5) preferSingle = true;
-    else {
-      if (r.single.bestDD < r.dual.bestDD - 2) preferSingle = true;
-      else if (r.dual.bestDD < r.single.bestDD - 2) preferDual = true;
-      else preferSingle = true;
-    }
-  } else if (dualViable) {
-    preferDual = true;
-  } else if (singleViable) {
-    preferSingle = true;
+  // No mode passes relative improvement threshold
+  if (!dualViable && !singleViable && !cashViable) {
+    text = `NOT RECOMMENDED - Improvement too small relative to EOD returns. ${comparison}`;
+    return { text, warning };
   }
 
-  // Generate recommendation text — always show both scores
-  if (preferDual) {
-    const q = getCompositeQuality(dualScore);
-    text = `USE DUAL @ ${r.dual.bestTime} (${q.label}). ${comparison}`;
-    if (dualDDWorse) warning = `Drawdown increases from ${r.eod.maxDD.toFixed(1)}% to ${r.dual.bestDD.toFixed(1)}%`;
-    if (dualHasHighDD) warning = (warning ? warning + ' | ' : '') + `High drawdown risk (${r.dual.bestDD.toFixed(1)}%)`;
-  } else if (preferSingle) {
-    const q = getCompositeQuality(singleScore);
-    text = `USE SINGLE @ ${r.single.bestTime} (${q.label}). ${comparison}`;
-    if (singleDDWorse) warning = `Drawdown increases from ${r.eod.maxDD.toFixed(1)}% to ${r.single.bestDD.toFixed(1)}%`;
-    if (singleHasHighDD) warning = (warning ? warning + ' | ' : '') + `High drawdown risk (${r.single.bestDD.toFixed(1)}%)`;
+  // Build candidates array: {mode, score, dd, ddWorse, ddHigh, time}
+  const candidates = [];
+  if (dualViable) candidates.push({ mode: 'DUAL', score: dualScore, dd: r.dual.bestDD, ddWorse: dualDDWorse, ddHigh: dualHasHighDD, time: r.dual.bestTime });
+  if (singleViable) candidates.push({ mode: 'SINGLE', score: singleScore, dd: r.single.bestDD, ddWorse: singleDDWorse, ddHigh: singleHasHighDD, time: r.single.bestTime });
+  if (cashViable) candidates.push({ mode: 'CASH', score: cashScore, dd: r.cash.bestDD, ddWorse: cashDDWorse, ddHigh: cashHasHighDD, time: r.cash.bestTime });
+
+  // Sort by composite score descending, then DD ascending as tiebreaker
+  candidates.sort((a, b) => {
+    if (Math.abs(a.score - b.score) > 5) return b.score - a.score;
+    return a.dd - b.dd;
+  });
+
+  const best = candidates[0];
+  if (best) {
+    const q = getCompositeQuality(best.score);
+    text = `USE ${best.mode} @ ${best.time} (${q.label}). ${comparison}`;
+    if (best.ddWorse) warning = `Drawdown increases from ${r.eod.maxDD.toFixed(1)}% to ${best.dd.toFixed(1)}%`;
+    if (best.ddHigh) warning = (warning ? warning + ' | ' : '') + `High drawdown risk (${best.dd.toFixed(1)}%)`;
   } else {
     text = `NOT RECOMMENDED - No mode passes thresholds. ${comparison}`;
   }
@@ -4553,10 +6149,12 @@ function printCombinedSummaryTable(results) {
     let best = 'EOD';
     let hasWarning = false;
     const rec = generateCombinedRecommendation(r);
-    if (rec.text.includes('DUAL')) {
+    if (rec.text.includes('USE DUAL')) {
       best = 'DUAL';
-    } else if (rec.text.includes('SINGLE')) {
+    } else if (rec.text.includes('USE SINGLE')) {
       best = 'SINGLE';
+    } else if (rec.text.includes('USE CASH')) {
+      best = 'CASH';
     }
     if (rec.warning) {
       hasWarning = true;
@@ -4567,7 +6165,8 @@ function printCombinedSummaryTable(results) {
     // Best composite score (from whichever mode the recommendation prefers)
     const dualCS = (r.dual.compositeScores && r.dual.bestTime && r.dual.compositeScores[r.dual.bestTime]) ? r.dual.compositeScores[r.dual.bestTime].total : 0;
     const singleCS = (r.single.compositeScores && r.single.bestTime && r.single.compositeScores[r.single.bestTime]) ? r.single.compositeScores[r.single.bestTime].total : 0;
-    const topScore = Math.max(dualCS, singleCS);
+    const cashCSVal = (r.cash && r.cash.compositeScores && r.cash.bestTime && r.cash.compositeScores[r.cash.bestTime]) ? r.cash.compositeScores[r.cash.bestTime].total : 0;
+    const topScore = Math.max(dualCS, singleCS, cashCSVal);
     const scoreStr = topScore > 0 ? `${topScore}` : '-';
 
     // Wrap long names
@@ -4593,8 +6192,9 @@ function printCombinedSummaryTable(results) {
   console.log('  Legend:');
   console.log('    • EOD Ret/DD = Baseline performance (EOD-only trading)');
   console.log('    • Dual = Morning trade + EOD trade | Single = Replace EOD with different time');
+  console.log('    • Cash = Go to cash midday, re-enter at EOD');
   console.log('    • Imp = Improvement vs EOD-only baseline');
-  console.log('    • Best = Recommended mode (EOD/DUAL/SINGLE)');
+  console.log('    • Best = Recommended mode (EOD/DUAL/SINGLE/CASH)');
   console.log('    • Score = Composite quality score: STRONG (75+), GOOD (55-74), MARGINAL (40-54), WEAK (<40)');
   console.log('    • ⚠️ = High drawdown warning (DD > 30% or DD increased significantly)');
   console.log('');
@@ -4755,38 +6355,115 @@ function collectConditions(node, dailyData, intradayData, date, time, path = [])
       }
 
       if (cond) {
-        const lhsWindow = cond['lhs-fn-params']?.window || parseInt(cond['lhs-window-days']) || 14;
-        const rhsWindow = cond['rhs-fn-params']?.window || parseInt(cond['rhs-window-days']) || 14;
-        const c = {
-          lf: cond['lhs-fn'], lv: cond['lhs-val'], lw: lhsWindow,
-          cmp: cond.comparator, rv: cond['rhs-val'], rf: cond['rhs-fixed-value?'],
-          rfn: cond['rhs-fn'], rw: rhsWindow
-        };
+        let combinedResult;
+        if (isCompoundCondition(cond)) {
+          // Compound condition (ANY/ALL): evaluate each sub-condition and collect results
+          const { operator, conditions: subConds } = cond.condition;
+          const opLabel = operator === 'any' ? 'ANY' : 'ALL';
+          const subResults = [];
 
-        const v = evalCondVerbose(c, dailyData, intradayData, date, time);
+          for (let si = 0; si < subConds.length; si++) {
+            const sub = subConds[si];
+            // Handle nested compound conditions (ANY of ALLs, etc.)
+            if (sub['condition-type'] === 'compound' || (sub.operator && sub.conditions)) {
+              const nestedOp = sub.operator;
+              const nestedLabel = nestedOp === 'any' ? 'ANY' : 'ALL';
+              const nestedResult = evalCompoundSubRecursive(sub, dailyData, intradayData, date, time, false);
+              conditions.push({
+                path: currentPath.join(' > '),
+                condition: `[${opLabel} ${si + 1}/${subConds.length}] Nested [${nestedLabel}] (${sub.conditions.length} sub-conditions)`,
+                lhsValue: null,
+                rhsValue: null,
+                result: nestedResult,
+                margin: null,
+                branchTaken: null,
+                _compoundOperator: operator,
+                _compoundIndex: si
+              });
+              subResults.push(nestedResult);
+              continue;
+            }
+            const flatSub = flattenCompoundSubCondition(sub);
+            if (!flatSub) { subResults.push(null); continue; }
+            const v = evalCondVerbose(flatSub, dailyData, intradayData, date, time);
 
-        // Calculate margin (how close to flipping)
-        let margin = null;
-        if (v.lhsValue !== null && v.rhsValue !== null) {
-          const diff = v.lhsValue - v.rhsValue;
-          const base = Math.abs(v.rhsValue) > 0.0001 ? Math.abs(v.rhsValue) : 1;
-          margin = (diff / base) * 100; // percentage difference
+            let margin = null;
+            if (v.lhsValue !== null && v.rhsValue !== null) {
+              const diff = v.lhsValue - v.rhsValue;
+              const base = Math.abs(v.rhsValue) > 0.0001 ? Math.abs(v.rhsValue) : 1;
+              margin = (diff / base) * 100;
+            }
+
+            conditions.push({
+              path: currentPath.join(' > '),
+              condition: `[${opLabel} ${si + 1}/${subConds.length}] ${formatConditionString(v)}`,
+              lhsValue: v.lhsValue,
+              rhsValue: v.rhsValue,
+              result: v.evalResult,
+              margin,
+              branchTaken: null, // Individual sub-conditions don't determine branch
+              _compoundOperator: operator,
+              _compoundIndex: si
+            });
+            subResults.push(v.evalResult);
+          }
+
+          // Three-valued logic: short-circuit before considering nulls
+          const hasNull = subResults.some(s => s === null);
+          if (operator === 'any') {
+            if (subResults.some(s => s === true)) combinedResult = true;
+            else combinedResult = hasNull ? null : false;
+          } else { // 'all'
+            if (subResults.some(s => s === false)) combinedResult = false;
+            else combinedResult = hasNull ? null : true;
+          }
+
+          // Push a summary entry for the combined result
+          conditions.push({
+            path: currentPath.join(' > '),
+            condition: `[${opLabel} combined] ${subConds.length} sub-conditions`,
+            lhsValue: null,
+            rhsValue: null,
+            result: combinedResult,
+            margin: null,
+            branchTaken: combinedResult === true ? 'THEN' : 'ELSE',
+            _compoundSummary: true
+          });
+        } else {
+          const lhsWindow = cond['lhs-fn-params']?.window || parseInt(cond['lhs-window-days']) || 14;
+          const rhsWindow = cond['rhs-fn-params']?.window || parseInt(cond['rhs-window-days']) || 14;
+          const c = {
+            lf: cond['lhs-fn'], lv: cond['lhs-val'], lw: lhsWindow,
+            cmp: cond.comparator, rv: cond['rhs-val'], rf: cond['rhs-fixed-value?'],
+            rfn: cond['rhs-fn'], rw: rhsWindow
+          };
+
+          const v = evalCondVerbose(c, dailyData, intradayData, date, time);
+
+          // Calculate margin (how close to flipping)
+          let margin = null;
+          if (v.lhsValue !== null && v.rhsValue !== null) {
+            const diff = v.lhsValue - v.rhsValue;
+            const base = Math.abs(v.rhsValue) > 0.0001 ? Math.abs(v.rhsValue) : 1;
+            margin = (diff / base) * 100;
+          }
+
+          conditions.push({
+            path: currentPath.join(' > '),
+            condition: formatConditionString(v),
+            lhsValue: v.lhsValue,
+            rhsValue: v.rhsValue,
+            result: v.evalResult,
+            margin,
+            branchTaken: v.evalResult === true ? 'THEN' : 'ELSE'
+          });
+          combinedResult = v.evalResult;
         }
 
-        conditions.push({
-          path: currentPath.join(' > '),
-          condition: formatConditionString(v),
-          lhsValue: v.lhsValue,
-          rhsValue: v.rhsValue,
-          result: v.evalResult,
-          margin,
-          branchTaken: v.evalResult === true ? 'THEN' : 'ELSE'
-        });
-
         // Continue walking the taken branch
-        if (v.evalResult === true && cond.children) {
+        if (combinedResult === true && cond.children) {
           cond.children.forEach((child, i) => walk(child, [...currentPath, `THEN[${i}]`]));
-        } else if ((v.evalResult === false || v.evalResult === null) && els?.children) {
+        } else if ((combinedResult === false || combinedResult === null) && els?.children) {
           els.children.forEach((child, i) => walk(child, [...currentPath, `ELSE[${i}]`]));
         }
       }
@@ -5559,9 +7236,14 @@ ${'─'.repeat(70)}
      "Should I REPLACE ${CONFIG.EOD_TIME} with a different time?"
      Simulates trading ONLY at a different time, skipping EOD entirely.
 
-  3. COMBINED ANALYSIS (Dual + Single)
-     Runs both analyses and recommends the best approach considering
+  3. COMBINED ANALYSIS (Dual + Single + Cash)
+     Runs all three analyses and recommends the best approach considering
      return improvement AND drawdown risk.
+
+  c. CASH-AT-TIME ANALYSIS
+     "Should I go to cash midday and re-enter at EOD (${CONFIG.EOD_TIME})?"
+     Simulates liquidating to cash at a morning time, then letting
+     Composer re-enter positions at EOD automated rebalance.
 
 ${'─'.repeat(70)}
   SIGNAL SUB-ANALYSIS:
@@ -5618,7 +7300,7 @@ ${'─'.repeat(70)}
         }
 
         case '3': {
-          console.log('\nCOMBINED ANALYSIS (Dual + Single)');
+          console.log('\nCOMBINED ANALYSIS (Dual + Single + Cash)');
           const ids = await askSymphonyIds(r, 'combined analysis');
 
           if (ids.length === 0) break;
@@ -5626,6 +7308,18 @@ ${'─'.repeat(70)}
           const days = await askDateRange(r, ids[0]);
           const results = await combinedAnalysis(ids, days);
           printCombinedResults(results);
+          break;
+        }
+
+        case 'c': {
+          console.log('\nCASH-AT-TIME ANALYSIS');
+          const ids = await askSymphonyIds(r, 'cash-at-time analysis');
+
+          if (ids.length === 0) break;
+
+          const days = await askDateRange(r, ids[0]);
+          const results = await cashTimeAnalysis(ids, days);
+          printCashTimeResults(results);
           break;
         }
 
@@ -5805,11 +7499,31 @@ async function main() {
     if (flag === '--walkforward' || flag === '--wf') {
       CONFIG.walkforward = true;
     }
+    if (flag === '--oos-wf' || flag === '--oos') {
+      CONFIG.oosWalkforward = true;
+    }
+    if (flag === '--composer-baseline' || flag === '--cb') {
+      CONFIG.composerBaseline = true;
+    }
     if (flag.startsWith('--window=')) {
       CONFIG.wfWindowSize = parseInt(flag.split('=')[1]) || 21;
     }
     if (flag.startsWith('--step=')) {
       CONFIG.wfStepSize = parseInt(flag.split('=')[1]) || 21;
+    }
+    if (flag.startsWith('--oos-train=')) {
+      CONFIG.oosTrainWindowSize = parseInt(flag.split('=')[1]) || 63;
+    }
+    if (flag.startsWith('--wf-candidates=')) {
+      CONFIG.wfMaxCandidates = parseInt(flag.split('=')[1]) || 10;
+    }
+    if (flag.startsWith('--start=')) {
+      const d = flag.split('=')[1];
+      if (/^\d{4}-\d{2}-\d{2}$/.test(d)) CONFIG.dateStart = d;
+    }
+    if (flag.startsWith('--end=')) {
+      const d = flag.split('=')[1];
+      if (/^\d{4}-\d{2}-\d{2}$/.test(d)) CONFIG.dateEnd = d;
     }
   }
   // Apply --days after --source so it always wins
@@ -5864,6 +7578,15 @@ async function main() {
         }
         const combinedResults = await combinedAnalysis(ids, CONFIG.MAX_INTRADAY_DAYS);
         printCombinedResults(combinedResults);
+        break;
+
+      case 'cash':
+        if (ids.length === 0) {
+          console.log('Usage: node script.js cash <symphony_id> [id2] [id3]...');
+          return;
+        }
+        const cashResults = await cashTimeAnalysis(ids, CONFIG.MAX_INTRADAY_DAYS);
+        printCashTimeResults(cashResults);
         break;
 
       case 'walkforward':
@@ -5939,13 +7662,13 @@ async function main() {
           console.log(`  ${d} | ${prices.join(' | ')}`);
         }
 
-        // Compute and display holdings for each recent day at 15:45
-        console.log(`\nHoldings at 15:45 (EOD):`);
+        // Compute and display holdings for each recent day at EOD
+        console.log(`\nHoldings at ${CONFIG.EOD_TIME} (EOD):`);
         console.log('-'.repeat(80));
         for (const d of hRecentDays) {
           clearMemoCache(); clearSortedKeysCache();
           DIAGNOSTICS.reset();
-          const assets = getAssetsWithWeights(hScore, hDaily, hIntra, d, '15:45');
+          const assets = getAssetsWithWeights(hScore, hDaily, hIntra, d, CONFIG.EOD_TIME);
           const holdStr = assets.length > 0
             ? assets.map(a => `${a.ticker}(${(a.weight*100).toFixed(0)}%)`).join(', ')
             : '(no signal)';
@@ -6447,6 +8170,7 @@ Usage:
   node script.js dual <id> [id2]...          Dual trade time analysis
   node script.js single <id> [id2]...        Single time replacement analysis
   node script.js combined <id> [id2]...      Combined analysis
+  node script.js cash <id> [id2]...          Cash-at-time analysis (go to cash midday)
   node script.js walkforward <id> [id2]...   Walk-forward consistency (auto 5min)
   node script.js flip <id>                   Signal flip frequency
   node script.js check <id>                  Today's signal check
@@ -6469,9 +8193,13 @@ Flags:
   --debug-compare                            Compare Alpaca vs Yahoo data
   --ids=ID1,ID2                              Filter to specific strategy IDs
   --predict                                  Run tree-walk prediction (live-holdings)
-  --walkforward, --wf                         Add walk-forward consistency analysis
-  --window=N                                  Walk-forward window size (default: 21 days)
-  --step=N                                    Walk-forward step size (default: 21 days)
+  --walkforward, --wf                         Tier 1: walk-forward consistency check
+  --oos-wf, --oos                             Tier 2: true out-of-sample walk-forward
+  --window=N                                  Tier 1 window size (default: 21 days)
+  --step=N                                    Tier 1 step size (default: 21 days)
+  --oos-train=N                               Tier 2 training window (default: 63 days)
+  --wf-candidates=N                           Max candidate times for WF (default: 10)
+  --composer-baseline, --cb                   Use Composer's backtest holdings as EOD baseline
 
 Intraday Modes:
   Default: 15-min bars (fast, ~1 min for 150 tickers)
@@ -6499,6 +8227,13 @@ module.exports = {
   dualTimeAnalysis,
   singleTimeAnalysis,
   combinedAnalysis,
+  cashTimeAnalysis,
+  runOOSWalkforward,
+  computeBaseScores,
+  selectWFCandidates,
+  computeRobustnessCheck,
+  computeOOSScores,
+  computeFinalScores,
   computeWalkforward,
   deriveDailyReturns,
   selectBestTime,
@@ -6519,7 +8254,20 @@ module.exports = {
   clearTickerDataCache,
   saveConfig,
   loadConfig,
+  walkVerbose,
+  runSingleTimeBacktest,
+  clearMemoCache,
+  clearSortedKeysCache,
+  applyDateRange,
   APP_DIR,
+  getIntradayPrice,
+  runDualTimeBacktest,
+  runCashTimeBacktest,
+  runEODOnlyBacktest,
+  fetchComposerBaselineHoldings,
+  runComposerBaselineBacktest,
+  shouldRebalance,
+  getDriftedWeights,
 };
 
 if (require.main === module) {

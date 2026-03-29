@@ -53,6 +53,9 @@ function saveGUISettings(updates) {
   if (saved.testTimes && Array.isArray(saved.testTimes) && saved.testTimes.length > 0) {
     analyzer.CONFIG.TEST_TIMES = saved.testTimes;
   }
+  if (saved.baselineSource === 'composer') {
+    analyzer.CONFIG.composerBaseline = true;
+  }
 })();
 
 // ============================================================================
@@ -135,13 +138,20 @@ function buildReportHTML(r, mode) {
   const runDate = now.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   const modeLabel = mode === 'dual' ? 'Dual (Intraday + EOD)'
     : mode === 'single' ? 'Single (Replace EOD)'
-    : 'Combined (Dual + Single)';
+    : mode === 'cash' ? 'Cash (Go to Cash Midday)'
+    : 'Combined (Dual + Single + Cash)';
 
   function esc(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
   function pct(v, d) { if (v == null || isNaN(v)) return '-'; return (v >= 0 ? '+' : '') + v.toFixed(d) + '%'; }
   function cls(v) { if (v == null) return 'neutral'; return v > 0 ? 'pos' : v < 0 ? 'neg' : 'neutral'; }
   function ddCls(dd, baseDD) { if (dd == null || baseDD == null) return 'neutral'; return dd < baseDD ? 'pos' : dd > baseDD ? 'neg' : 'neutral'; }
   function ddCls2(chg) { if (chg == null) return 'neutral'; return chg < 0 ? 'pos' : chg > 0 ? 'neg' : 'neutral'; }
+  function ann(cumRet) { // Annualize a cumulative return using the strategy's trading days
+    if (cumRet == null || !r.tradingDays || r.tradingDays <= 0) return null;
+    var years = r.tradingDays / 252;
+    if (years <= 0) return null;
+    return (Math.pow(1 + cumRet / 100, 1 / years) - 1) * 100;
+  }
   function fDate(ymd) {
     if (!ymd) return '';
     var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -170,9 +180,16 @@ function buildReportHTML(r, mode) {
     var vDesc = s.verdict === 'CONSISTENT' ? 'Alpha is persistent and reliable'
       : s.verdict === 'EPISODIC' ? 'Alpha is real but regime-dependent'
       : 'Alpha concentrated in few windows \u2014 likely curve-fitted';
+    // Annualize robustness check alpha
+    var rcComp = 1;
+    for (var rci = 0; rci < wf.windows.length; rci++) rcComp *= (1 + wf.windows[rci].alpha / 100);
+    var rcCum2 = (rcComp - 1) * 100;
+    var rcYrs = (wf.windows.length * 21) / 252;
+    var rcAnn2 = rcYrs > 0 ? (Math.pow(1 + rcCum2 / 100, 1 / rcYrs) - 1) * 100 : null;
     h += '<div class="' + vClass + '" style="margin-top:8px"><strong>' + s.verdict + '</strong> \u2014 ';
     h += s.wins + '/' + s.total + ' windows (' + (s.winRate * 100).toFixed(1) + '%)';
     h += ' | Avg alpha: ' + pct(s.avgAlpha, 2);
+    if (rcAnn2 != null) h += ' | Ann alpha: ' + pct(rcAnn2, 1);
     if (s.total >= 3) h += ' | Recent: ' + s.recentWins + '/' + Math.min(3, s.total) + ' wins';
     h += '<div style="margin-top:4px;font-size:12px;opacity:0.7">' + vDesc + '</div></div>';
     return h;
@@ -197,7 +214,7 @@ function buildReportHTML(r, mode) {
     var uid = 'wf_' + Math.random().toString(36).slice(2, 8);
 
     var h = '<div class="section">';
-    h += '<div class="section-title">Walk-Forward Consistency</div>';
+    h += '<div class="section-title">Robustness Check (post-hoc slicing)</div>';
 
     if (hasTabs) {
       // Tab bar
@@ -208,7 +225,7 @@ function buildReportHTML(r, mode) {
         var isBest = t === bestTime;
         var vDot = twf.summary.verdict === 'CONSISTENT' ? '#3fb950' : twf.summary.verdict === 'EPISODIC' ? '#d29922' : '#f85149';
         var cs = compositeScores && compositeScores[t];
-        var wfScoreLabel = cs && cs.wfScore !== null ? ' (' + cs.wfScore + ')' : '';
+        var wfScoreLabel = cs ? (cs.robustnessScore !== null || cs.wfScore !== null ? ' (' + cs.total + ')' : '') : '';
         var activeStyle = isBest
           ? 'background:#58a6ff;color:#0d1117;font-weight:600'
           : 'background:#21262d;color:#8b949e';
@@ -241,6 +258,164 @@ function buildReportHTML(r, mode) {
     return h;
   }
 
+  function buildOOSWalkforwardSection(oos) {
+    if (!oos || !oos.summary || oos.summary.verdict === 'INSUFFICIENT_DATA') return '';
+    var s = oos.summary;
+    var h = '<div class="section">';
+    h += '<div class="section-title">Walk-Forward Test (true OOS)</div>';
+
+    // Windows table
+    h += '<table><thead><tr><th>Training Period</th><th>Chosen</th><th>Test Period</th><th>OOS Alpha</th><th>Win?</th></tr></thead><tbody>';
+    for (var i = 0; i < oos.windows.length; i++) {
+      var w = oos.windows[i];
+      var cls2 = w.win ? 'pos' : 'neg';
+      h += '<tr><td style="white-space:nowrap;font-size:12px">' + w.trainStart + ' \u2192 ' + w.trainEnd.slice(5) + '</td>';
+      h += '<td>' + w.trainBestTime + '</td>';
+      h += '<td style="white-space:nowrap;font-size:12px">' + w.testStart + ' \u2192 ' + w.testEnd.slice(5) + '</td>';
+      h += '<td class="' + cls2 + '">' + pct(w.testAlpha, 1) + '</td>';
+      h += '<td class="' + cls2 + '">' + (w.win ? '+' : '\u2212') + '</td></tr>';
+    }
+    h += '</tbody></table>';
+
+    // Verdict & summary
+    var vColor = s.verdict === 'OOS_CONFIRMED' ? '#3fb950' : s.verdict === 'OOS_DEGRADED' ? '#d29922' : '#f85149';
+    h += '<div style="margin-top:10px;font-size:13px">';
+    h += '<span style="color:' + vColor + ';font-weight:700">' + s.verdict.replace('OOS_', '') + '</span> &mdash; ';
+    h += s.wins + '/' + s.total + ' windows (' + (s.oosWinRate * 100).toFixed(1) + '%)';
+    h += ' &middot; Avg alpha: ' + pct(s.oosAvgAlpha, 2);
+    if (s.oosAnnAlpha != null) h += ' &middot; Annualized: ' + pct(s.oosAnnAlpha, 1);
+    h += '</div>';
+
+    h += '<div style="margin-top:6px;font-size:12px;color:var(--text2,#8b949e)">';
+    h += 'Most selected: <strong>' + s.oosBestTime + '</strong> (' + s.oosBestTimeCount + '/' + s.total + ' windows)';
+    if (s.degradationRatio != null) {
+      var dLabel = s.degradationRatio >= 0.75 ? 'EXCELLENT' : s.degradationRatio >= 0.50 ? 'ACCEPTABLE' : s.degradationRatio >= 0.25 ? 'SIGNIFICANT' : 'SEVERE';
+      var dColor = s.degradationRatio >= 0.50 ? '#3fb950' : s.degradationRatio >= 0.25 ? '#d29922' : '#f85149';
+      h += ' &middot; Degradation ratio: <span style="color:' + dColor + '">' + s.degradationRatio.toFixed(2) + ' (' + dLabel + ')</span>';
+    }
+    h += '</div>';
+
+    // Neighbor peak
+    if (oos.neighborPeak && Object.keys(oos.neighborPeak).length > 0) {
+      h += '<div style="margin-top:10px;font-size:12px;color:var(--text2,#8b949e)">Robustness Peak:</div>';
+      var peakTimes = Object.keys(oos.neighborPeak).sort();
+      h += '<div style="font-family:monospace;font-size:12px;margin-top:4px">';
+      for (var pi = 0; pi < peakTimes.length; pi++) {
+        var pt = peakTimes[pi];
+        var pp = oos.neighborPeak[pt];
+        var fullBTStr = pp.fullBTImprovement != null ? pct(pp.fullBTImprovement, 1) : 'n/a';
+        var oosStr = pp.isCandidate && pp.timesChosen > 0 ? pct(pp.oosAvgAlpha, 1) + ' (' + pp.timesChosen + 'x)' : (pp.isCandidate ? 'never chosen' : 'not tested');
+        var marker = pp.isOOSBest ? ' \u25C0 OOS BEST' : '';
+        h += pt + ': BT ' + fullBTStr + ' / OOS ' + oosStr + marker + '<br>';
+      }
+      h += '</div>';
+    }
+
+    h += '</div>';
+    return h;
+  }
+
+  function buildCandidateOOSPanel(candidateOOS, time) {
+    if (!candidateOOS || !candidateOOS.windows || candidateOOS.windows.length === 0) return '';
+    var h = '<table><thead><tr><th>Test Period</th><th>OOS Alpha</th><th>Win?</th><th>Training Chose</th></tr></thead><tbody>';
+    for (var i = 0; i < candidateOOS.windows.length; i++) {
+      var w = candidateOOS.windows[i];
+      var c2 = w.win ? 'pos' : 'neg';
+      h += '<tr><td style="white-space:nowrap;font-size:12px">' + w.testStart + ' \u2192 ' + w.testEnd.slice(5) + '</td>';
+      h += '<td class="' + c2 + '">' + pct(w.testAlpha, 1) + '</td>';
+      h += '<td class="' + c2 + '">' + (w.win ? '+' : '\u2212') + '</td>';
+      h += '<td style="font-size:11px;color:#8b949e">' + (w.chosenInTraining || '\u2014') + '</td></tr>';
+    }
+    h += '</tbody></table>';
+    h += '<div style="font-size:12px;margin-top:6px;color:#8b949e">';
+    // Annualize per-candidate OOS alpha
+    var cComp = 1;
+    for (var ci = 0; ci < candidateOOS.windows.length; ci++) cComp *= (1 + candidateOOS.windows[ci].testAlpha / 100);
+    var cCum = (cComp - 1) * 100;
+    var cYears = (candidateOOS.windows.length * 21) / 252;
+    var cAnn = cYears > 0 ? (Math.pow(1 + cCum / 100, 1 / cYears) - 1) * 100 : null;
+    h += (candidateOOS.winRate * 100).toFixed(0) + '% win rate | Avg alpha: ' + pct(candidateOOS.avgAlpha, 2);
+    if (cAnn != null) h += ' | Ann alpha: ' + pct(cAnn, 1);
+    if (candidateOOS.timesChosenInTraining > 0) h += ' | Chosen in training: ' + candidateOOS.timesChosenInTraining + 'x';
+    h += '</div>';
+    return h;
+  }
+
+  function buildUnifiedWfSection(allWfResults, oosWalkforward, compositeScores, bestTime) {
+    var hasT1 = allWfResults && typeof allWfResults === 'object' && Object.keys(allWfResults).length > 0;
+    var hasT2 = oosWalkforward && oosWalkforward.perCandidateOOS && Object.keys(oosWalkforward.perCandidateOOS).length > 0;
+    if (!hasT1 && !hasT2) return '';
+
+    var candidateTimes = [];
+    var seen = {};
+    if (hasT1) { for (var k in allWfResults) { if (allWfResults[k] && allWfResults[k].summary && allWfResults[k].summary.verdict !== 'INSUFFICIENT_DATA' && !seen[k]) { candidateTimes.push(k); seen[k] = 1; } } }
+    if (hasT2) { for (var k in oosWalkforward.perCandidateOOS) { if (!seen[k]) { candidateTimes.push(k); seen[k] = 1; } } }
+    candidateTimes.sort();
+    if (candidateTimes.length === 0) return '';
+
+    var uid = 'uwf_' + Math.random().toString(36).slice(2, 8);
+    var heading = hasT1 && hasT2 ? 'Walk-Forward Analysis' : hasT1 ? 'Robustness Check (post-hoc slicing)' : 'Walk-Forward Test (true OOS)';
+    var h = '<div class="section"><div class="section-title">' + heading + '</div>';
+
+    // Tab bar
+    if (candidateTimes.length > 1) {
+      h += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px">';
+      for (var i = 0; i < candidateTimes.length; i++) {
+        var t = candidateTimes[i];
+        var cs = compositeScores && compositeScores[t];
+        var isBest = t === bestTime;
+        var vDot = '#8b949e';
+        if (hasT1 && allWfResults[t] && allWfResults[t].summary) {
+          var v = allWfResults[t].summary.verdict;
+          vDot = v === 'CONSISTENT' ? '#3fb950' : v === 'EPISODIC' ? '#d29922' : '#f85149';
+        }
+        var scoreLabel = cs ? ' (' + cs.total + ')' : '';
+        var activeStyle = isBest ? 'background:#58a6ff;color:#0d1117;font-weight:600' : 'background:#21262d;color:#8b949e';
+        h += '<button class="wf-tab" data-uid="' + uid + '" data-time="' + t + '" '
+          + 'style="border:1px solid #30363d;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;' + activeStyle + '" '
+          + 'onclick="switchWfTab(this,\'' + uid + '\',\'' + t + '\')">'
+          + '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:' + vDot + ';margin-right:4px;vertical-align:middle"></span>'
+          + t + (isBest ? ' BEST' : '') + scoreLabel + '</button>';
+      }
+      h += '</div>';
+    }
+
+    // Panels
+    for (var i = 0; i < candidateTimes.length; i++) {
+      var t = candidateTimes[i];
+      var isBest = t === bestTime;
+      var showStyle = candidateTimes.length > 1 ? (isBest ? '' : 'display:none') : '';
+      h += '<div class="wf-panel" data-uid="' + uid + '" data-time="' + t + '" style="' + showStyle + '">';
+
+      // Score summary
+      var cs = compositeScores && compositeScores[t];
+      if (cs) {
+        h += '<div style="font-size:12px;margin-bottom:8px;color:#8b949e">Score: <strong style="color:#e6edf3">' + cs.total + '/100</strong>';
+        h += ' \u2014 Return ' + cs.returnScore + ' | DD ' + cs.ddScore + ' | Neighbors ' + cs.neighborScore;
+        if (cs.robustnessScore !== null) h += ' | RC ' + cs.robustnessScore;
+        if (cs.wfScore !== null) h += ' | OOS ' + cs.wfScore;
+        h += '</div>';
+      }
+
+      // Tier 1
+      if (hasT1 && allWfResults[t] && allWfResults[t].summary && allWfResults[t].summary.verdict !== 'INSUFFICIENT_DATA') {
+        h += '<div style="font-size:11px;font-weight:600;text-transform:uppercase;color:#8b949e;margin-bottom:4px">Robustness Check (post-hoc slicing)</div>';
+        h += buildSingleWfPanel(allWfResults[t], '@' + t);
+      }
+
+      // Tier 2
+      if (hasT2 && oosWalkforward.perCandidateOOS[t]) {
+        h += '<div style="font-size:11px;font-weight:600;text-transform:uppercase;color:#8b949e;margin:8px 0 4px">Walk-Forward Test (true OOS)</div>';
+        h += buildCandidateOOSPanel(oosWalkforward.perCandidateOOS[t], t);
+      }
+
+      h += '</div>';
+    }
+
+    h += '</div>';
+    return h;
+  }
+
   var body = '';
 
   // Header
@@ -252,28 +427,35 @@ function buildReportHTML(r, mode) {
 
   // EOD baseline
   body += '<div class="section">';
-  body += '<div class="section-title">Baseline (EOD ' + esc(eodTime) + ')</div>';
-  body += '<div class="baseline">Return: <span class="' + cls(r.eod.cumReturn) + '">' + pct(r.eod.cumReturn, 2) + '</span>';
+  var blLabel = r.baselineSource === 'composer' ? 'Baseline (Composer Backtest)' : 'Baseline (EOD ' + esc(eodTime) + ')';
+  body += '<div class="section-title">' + blLabel + '</div>';
+  var cumFmt = ' (' + pct(r.eod.cumReturn, 1) + ' cum.)';
+  var annVal = r.eod.annReturn != null ? r.eod.annReturn : ann(r.eod.cumReturn);
+  body += '<div class="baseline">Return: <span class="' + cls(r.eod.cumReturn) + '">' + pct(annVal, 1) + ' ann.' + cumFmt + '</span>';
   body += ' &nbsp;\u00B7&nbsp; Max Drawdown: <span class="neg">' + r.eod.maxDD.toFixed(2) + '%</span></div>';
   body += '</div>';
 
-  if (mode === 'dual' || mode === 'single') {
+  if (mode === 'dual' || mode === 'single' || mode === 'cash') {
     // Time-by-time table
     var times = r.times || {};
     var timeKeys = testTimes.length > 0 ? testTimes : Object.keys(times).sort();
     body += '<div class="section">';
     body += '<div class="section-title">Results by Time</div>';
-    body += '<table><thead><tr><th>Time</th><th>Cum Return</th><th>vs EOD</th><th>Max Drawdown</th><th>DD vs EOD</th></tr></thead><tbody>';
+    var eodAnnReport = r.eod.annReturn != null ? r.eod.annReturn : ann(r.eod.cumReturn);
+    body += '<table><thead><tr><th>Time</th><th>Ann Return</th><th>Cum Return</th><th>vs EOD</th><th>Max Drawdown</th><th>DD vs EOD</th></tr></thead><tbody>';
     for (var i = 0; i < timeKeys.length; i++) {
       var time = timeKeys[i];
       if (!times[time]) continue;
       var t = times[time];
       var isBest = time === r.bestTime;
       var ddChg = t.maxDD - r.eod.maxDD;
+      var annVal2 = t.annReturn != null ? t.annReturn : ann(t.cumReturn);
+      var annDiffReport = annVal2 != null && eodAnnReport != null ? annVal2 - eodAnnReport : t.improvement;
       body += '<tr class="' + (isBest ? 'best' : '') + '">';
       body += '<td>' + time + (isBest ? ' <span class="badge">BEST</span>' : '') + '</td>';
-      body += '<td>' + pct(t.cumReturn, 2) + '</td>';
-      body += '<td class="' + cls(t.improvement) + '">' + pct(t.improvement, 2) + '</td>';
+      body += '<td>' + pct(annVal2, 1) + '</td>';
+      body += '<td>' + pct(t.cumReturn, 1) + '</td>';
+      body += '<td class="' + cls(annDiffReport) + '">' + pct(annDiffReport, 1) + '</td>';
       body += '<td>' + t.maxDD.toFixed(2) + '%</td>';
       body += '<td class="' + ddCls2(ddChg) + '">' + pct(ddChg, 2) + '</td>';
       body += '</tr>';
@@ -284,10 +466,11 @@ function buildReportHTML(r, mode) {
     // Recommendation
     var stCS = (r.compositeScores && r.bestTime) ? r.compositeScores[r.bestTime] : null;
     var stScr = stCS ? ' (score ' + stCS.total + '/100)' : '';
-    var recClass = r.recommendation === 'ADD_MORNING' || r.recommendation === 'USE_MORNING' ? 'rec-add'
+    var recClass = r.recommendation === 'ADD_MORNING' || r.recommendation === 'USE_MORNING' || r.recommendation === 'GO_CASH' ? 'rec-add'
       : r.recommendation === 'STICK_EOD' ? 'rec-warn' : 'rec-keep';
     var recText = r.recommendation === 'ADD_MORNING' ? 'Consider adding intraday trade at ' + r.bestTime + stScr + ' (' + pct(r.bestImprovement, 1) + ' improvement)'
       : r.recommendation === 'USE_MORNING' ? 'Consider switching to ' + r.bestTime + stScr + ' (' + pct(r.bestImprovement, 1) + ' vs EOD)'
+      : r.recommendation === 'GO_CASH' ? 'Consider going to cash at ' + r.bestTime + stScr + ' (' + pct(r.bestImprovement, 1) + ' improvement vs EOD-only)'
       : r.recommendation === 'STICK_EOD' ? 'Stick with EOD-only \u2014 ' + mode + '-time shows worse results'
       : r.recommendation === 'KEEP_EOD' ? 'Keep default EOD execution'
       : 'Marginal difference \u2014 EOD-only is simpler';
@@ -296,15 +479,13 @@ function buildReportHTML(r, mode) {
     // Composite score breakdown
     if (r.compositeScores && r.bestTime && r.compositeScores[r.bestTime]) {
       var cs = r.compositeScores[r.bestTime];
-      var wfPart = cs.wfScore !== null ? ' &middot; WF ' + cs.wfScore : '';
-      body += '<div class="meta" style="margin-top:6px;font-size:12px">Selection score: <strong>' + cs.total + '/100</strong> (Return ' + cs.returnScore + ', DD ' + cs.ddScore + ', Neighbors ' + cs.neighborScore + wfPart + ')</div>';
+      var rcPart = cs.robustnessScore !== null ? ' &middot; RC ' + cs.robustnessScore : '';
+      var oosPart = cs.wfScore !== null ? ' &middot; OOS ' + cs.wfScore : '';
+      body += '<div class="meta" style="margin-top:6px;font-size:12px">Selection score: <strong>' + cs.total + '/100</strong> (Return ' + cs.returnScore + ', DD ' + cs.ddScore + ', Neighbors ' + cs.neighborScore + rcPart + oosPart + ')</div>';
     }
 
     // Walk-forward
-    if (r.walkforward) {
-      var wfLabel = mode === 'dual' ? 'Dual' : '@' + r.bestTime;
-      body += buildWalkforwardSection(r.walkforward, wfLabel, r.allWalkforwardResults, r.bestTime, r.compositeScores);
-    }
+    body += buildUnifiedWfSection(r.allWalkforwardResults, r.oosWalkforward, r.compositeScores, r.bestTime);
 
     // Hint to run combined for full composite analysis
     if (r.bestImprovement > 0) {
@@ -316,67 +497,104 @@ function buildReportHTML(r, mode) {
     // Summary: best of each mode
     body += '<div class="section">';
     body += '<div class="section-title">Best of Each Mode</div>';
-    var eodBase = r.eod.cumReturn;
-    var dRelPct = eodBase !== 0 ? (r.dual.improvement / Math.abs(eodBase)) * 100 : 0;
-    var sRelPct = eodBase !== 0 ? (r.single.improvement / Math.abs(eodBase)) * 100 : 0;
-    body += '<table><thead><tr><th>Mode</th><th>Best Time</th><th>Return</th><th>vs EOD</th><th>% of EOD</th><th>Max DD</th><th>DD vs EOD</th></tr></thead><tbody>';
+    var eodAnnRpt = r.eod.annReturn != null ? r.eod.annReturn : ann(r.eod.cumReturn);
+    var dualAnnBest = r.dual.bestAnnReturn != null ? r.dual.bestAnnReturn : ann(r.dual.bestReturn);
+    var singleAnnBest = r.single.bestAnnReturn != null ? r.single.bestAnnReturn : ann(r.single.bestReturn);
+    var dAnnDiff = dualAnnBest != null && eodAnnRpt != null ? dualAnnBest - eodAnnRpt : 0;
+    var sAnnDiff = singleAnnBest != null && eodAnnRpt != null ? singleAnnBest - eodAnnRpt : 0;
+    var dRelPct = eodAnnRpt != null && eodAnnRpt !== 0 ? (dAnnDiff / Math.abs(eodAnnRpt)) * 100 : 0;
+    var sRelPct = eodAnnRpt != null && eodAnnRpt !== 0 ? (sAnnDiff / Math.abs(eodAnnRpt)) * 100 : 0;
+    body += '<table><thead><tr><th>Mode</th><th>Best Time</th><th>Ann Return</th><th>vs EOD</th><th>% of EOD</th><th>Max DD</th><th>DD vs EOD</th></tr></thead><tbody>';
     body += '<tr><td>Dual (Intraday + EOD)</td><td>' + r.dual.bestTime + '</td>';
-    body += '<td>' + pct(r.dual.bestReturn, 2) + '</td>';
-    body += '<td class="' + cls(r.dual.improvement) + '">' + pct(r.dual.improvement, 2) + '</td>';
+    body += '<td>' + pct(dualAnnBest, 1) + '</td>';
+    body += '<td class="' + cls(dAnnDiff) + '">' + pct(dAnnDiff, 1) + '</td>';
     body += '<td class="' + cls(dRelPct) + '">' + pct(dRelPct, 0) + '</td>';
     body += '<td>' + r.dual.bestDD.toFixed(2) + '%</td>';
     body += '<td class="' + ddCls2(r.dual.bestDD - r.eod.maxDD) + '">' + pct(r.dual.bestDD - r.eod.maxDD, 2) + '</td></tr>';
     body += '<tr><td>Single (Replace EOD)</td><td>' + r.single.bestTime + '</td>';
-    body += '<td>' + pct(r.single.bestReturn, 2) + '</td>';
-    body += '<td class="' + cls(r.single.improvement) + '">' + pct(r.single.improvement, 2) + '</td>';
+    body += '<td>' + pct(singleAnnBest, 1) + '</td>';
+    body += '<td class="' + cls(sAnnDiff) + '">' + pct(sAnnDiff, 1) + '</td>';
     body += '<td class="' + cls(sRelPct) + '">' + pct(sRelPct, 0) + '</td>';
     body += '<td>' + r.single.bestDD.toFixed(2) + '%</td>';
     body += '<td class="' + ddCls2(r.single.bestDD - r.eod.maxDD) + '">' + pct(r.single.bestDD - r.eod.maxDD, 2) + '</td></tr>';
+    if (r.cash) {
+      var cashAnnBest = r.cash.bestAnnReturn != null ? r.cash.bestAnnReturn : ann(r.cash.bestReturn);
+      var cAnnDiff = cashAnnBest != null && eodAnnRpt != null ? cashAnnBest - eodAnnRpt : 0;
+      var cRelPct = eodAnnRpt != null && eodAnnRpt !== 0 ? (cAnnDiff / Math.abs(eodAnnRpt)) * 100 : 0;
+      body += '<tr><td>Cash (Go to Cash Midday)</td><td>' + r.cash.bestTime + '</td>';
+      body += '<td>' + pct(cashAnnBest, 1) + '</td>';
+      body += '<td class="' + cls(cAnnDiff) + '">' + pct(cAnnDiff, 1) + '</td>';
+      body += '<td class="' + cls(cRelPct) + '">' + pct(cRelPct, 0) + '</td>';
+      body += '<td>' + r.cash.bestDD.toFixed(2) + '%</td>';
+      body += '<td class="' + ddCls2(r.cash.bestDD - r.eod.maxDD) + '">' + pct(r.cash.bestDD - r.eod.maxDD, 2) + '</td></tr>';
+    }
     body += '</tbody></table>';
     body += '</div>';
 
     // Composite score boxes + recommendation (prominently after summary, before all-times)
     var dualCS = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
     var singleCS = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
+    var cashCSc = (r.cash && r.cash.compositeScores && r.cash.bestTime) ? r.cash.compositeScores[r.cash.bestTime] : null;
     var getQL = analyzer.getCompositeQuality;
     var dualTotal = dualCS ? dualCS.total : 0;
     var singleTotal = singleCS ? singleCS.total : 0;
+    var cashTotal = cashCSc ? cashCSc.total : 0;
     var eodAbs = Math.abs(r.eod.cumReturn);
     var dualRelPct = eodAbs > 1 ? (r.dual.improvement / eodAbs) * 100 : r.dual.improvement * 10;
     var singleRelPct = eodAbs > 1 ? (r.single.improvement / eodAbs) * 100 : r.single.improvement * 10;
+    var cashRelPct = r.cash ? (eodAbs > 1 ? (r.cash.improvement / eodAbs) * 100 : r.cash.improvement * 10) : -Infinity;
     var dualViable = dualRelPct >= 10;
     var singleViable = singleRelPct >= 10;
-    var bestMode, bestScore, bestImp, bestRel;
-    if (dualViable && singleViable) {
-      if (dualTotal >= singleTotal) { bestMode = 'Dual'; bestScore = dualTotal; bestImp = r.dual.improvement; bestRel = dualRelPct; }
-      else { bestMode = 'Single'; bestScore = singleTotal; bestImp = r.single.improvement; bestRel = singleRelPct; }
-    } else if (dualViable) { bestMode = 'Dual'; bestScore = dualTotal; bestImp = r.dual.improvement; bestRel = dualRelPct; }
-    else if (singleViable) { bestMode = 'Single'; bestScore = singleTotal; bestImp = r.single.improvement; bestRel = singleRelPct; }
-    else { bestMode = null; bestScore = 0; bestImp = 0; bestRel = 0; }
+    var cashViable = cashRelPct >= 10;
+
+    // Build candidates and pick best by score
+    var candidates = [];
+    if (dualViable) candidates.push({ mode: 'Dual', score: dualTotal, imp: r.dual.improvement, rel: dualRelPct, time: r.dual.bestTime });
+    if (singleViable) candidates.push({ mode: 'Single', score: singleTotal, imp: r.single.improvement, rel: singleRelPct, time: r.single.bestTime });
+    if (cashViable) candidates.push({ mode: 'Cash', score: cashTotal, imp: r.cash.improvement, rel: cashRelPct, time: r.cash.bestTime });
+    candidates.sort(function(a, b) { return b.score - a.score; });
+    var bestMode = candidates.length > 0 ? candidates[0].mode : null;
+    var bestScore = candidates.length > 0 ? candidates[0].score : 0;
+    var bestImp = candidates.length > 0 ? candidates[0].imp : 0;
+    var bestRel = candidates.length > 0 ? candidates[0].rel : 0;
+    var bestTime = candidates.length > 0 ? candidates[0].time : '';
 
     if (!bestMode) {
       body += '<div class="rec-warn">NOT RECOMMENDED \u2014 Improvement too small relative to EOD returns</div>';
     } else {
-      if (dualCS || singleCS) {
-        body += '<div style="display:flex;gap:8px;margin-bottom:10px">';
+      if (dualCS || singleCS || cashCSc) {
+        body += '<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">';
         if (dualCS) {
           var dq = getQL(dualCS.total);
-          body += '<div style="flex:1;padding:10px 12px;border-radius:6px;background:' + dq.bgColor + ';border:1px solid ' + dq.borderColor + ';line-height:1.6">';
+          body += '<div style="flex:1;min-width:200px;padding:10px 12px;border-radius:6px;background:' + dq.bgColor + ';border:1px solid ' + dq.borderColor + ';line-height:1.6">';
           body += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Dual @ ' + r.dual.bestTime + '</div>';
           body += '<span style="font-size:20px;font-weight:700;color:' + dq.htmlColor + '">' + dq.label + ' ' + dualCS.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
           body += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
           body += 'Return ' + dualCS.returnScore + ' &middot; DD ' + dualCS.ddScore + ' &middot; Neighbors ' + dualCS.neighborScore;
-          if (dualCS.wfScore !== null) body += ' &middot; WF ' + dualCS.wfScore;
+          if (dualCS.robustnessScore !== null) body += ' &middot; RC ' + dualCS.robustnessScore;
+          if (dualCS.wfScore !== null) body += ' &middot; OOS ' + dualCS.wfScore;
           body += '</div></div>';
         }
         if (singleCS) {
           var sq = getQL(singleCS.total);
-          body += '<div style="flex:1;padding:10px 12px;border-radius:6px;background:' + sq.bgColor + ';border:1px solid ' + sq.borderColor + ';line-height:1.6">';
+          body += '<div style="flex:1;min-width:200px;padding:10px 12px;border-radius:6px;background:' + sq.bgColor + ';border:1px solid ' + sq.borderColor + ';line-height:1.6">';
           body += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Single @ ' + r.single.bestTime + '</div>';
           body += '<span style="font-size:20px;font-weight:700;color:' + sq.htmlColor + '">' + sq.label + ' ' + singleCS.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
           body += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
           body += 'Return ' + singleCS.returnScore + ' &middot; DD ' + singleCS.ddScore + ' &middot; Neighbors ' + singleCS.neighborScore;
-          if (singleCS.wfScore !== null) body += ' &middot; WF ' + singleCS.wfScore;
+          if (singleCS.robustnessScore !== null) body += ' &middot; RC ' + singleCS.robustnessScore;
+          if (singleCS.wfScore !== null) body += ' &middot; OOS ' + singleCS.wfScore;
+          body += '</div></div>';
+        }
+        if (cashCSc) {
+          var cq = getQL(cashCSc.total);
+          body += '<div style="flex:1;min-width:200px;padding:10px 12px;border-radius:6px;background:' + cq.bgColor + ';border:1px solid ' + cq.borderColor + ';line-height:1.6">';
+          body += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Cash @ ' + r.cash.bestTime + '</div>';
+          body += '<span style="font-size:20px;font-weight:700;color:' + cq.htmlColor + '">' + cq.label + ' ' + cashCSc.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
+          body += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
+          body += 'Return ' + cashCSc.returnScore + ' &middot; DD ' + cashCSc.ddScore + ' &middot; Neighbors ' + cashCSc.neighborScore;
+          if (cashCSc.robustnessScore !== null) body += ' &middot; RC ' + cashCSc.robustnessScore;
+          if (cashCSc.wfScore !== null) body += ' &middot; OOS ' + cashCSc.wfScore;
           body += '</div></div>';
         }
         body += '</div>';
@@ -384,7 +602,7 @@ function buildReportHTML(r, mode) {
       var cRecClass = bestScore >= 55 ? 'rec-add' : 'rec-keep';
       var cRecText;
       if (bestScore >= 55) {
-        cRecText = 'USE ' + bestMode.toUpperCase() + ' @ ' + (bestMode === 'Dual' ? r.dual.bestTime : r.single.bestTime) + ' (' + pct(bestImp, 1) + ', ' + (bestRel >= 0 ? '+' : '') + bestRel.toFixed(0) + '% relative)';
+        cRecText = 'USE ' + bestMode.toUpperCase() + ' @ ' + bestTime + ' (' + pct(bestImp, 1) + ', ' + (bestRel >= 0 ? '+' : '') + bestRel.toFixed(0) + '% relative)';
       } else {
         cRecText = bestMode + ' mode marginal (' + pct(bestImp, 1) + ', ' + (bestRel >= 0 ? '+' : '') + bestRel.toFixed(0) + '% relative) \u2014 proceed with caution';
       }
@@ -396,18 +614,21 @@ function buildReportHTML(r, mode) {
       var dualKeys = testTimes.length > 0 ? testTimes : Object.keys(r.dual.times).sort();
       body += '<div class="section">';
       body += '<div class="section-title">Dual \u2014 All Times (Intraday + EOD)</div>';
-      body += '<table><thead><tr><th>Time</th><th>Cum Return</th><th>vs EOD</th><th>% of EOD</th><th>Max Drawdown</th><th>DD vs EOD</th></tr></thead><tbody>';
+      body += '<table><thead><tr><th>Time</th><th>Ann Return</th><th>Cum Return</th><th>vs EOD</th><th>% of EOD</th><th>Max Drawdown</th><th>DD vs EOD</th></tr></thead><tbody>';
       for (var di = 0; di < dualKeys.length; di++) {
         var dt = dualKeys[di];
         if (!r.dual.times[dt]) continue;
         var dv = r.dual.times[dt];
         var dBest = dt === r.dual.bestTime;
         var dDDChg = dv.maxDD - r.eod.maxDD;
-        var dRelPct2 = eodBase !== 0 ? (dv.improvement / Math.abs(eodBase)) * 100 : 0;
+        var dvAnn = dv.annReturn != null ? dv.annReturn : ann(dv.cumReturn);
+        var dvAnnDiff = dvAnn != null && eodAnnRpt != null ? dvAnn - eodAnnRpt : 0;
+        var dRelPct2 = eodAnnRpt != null && eodAnnRpt !== 0 ? (dvAnnDiff / Math.abs(eodAnnRpt)) * 100 : 0;
         body += '<tr class="' + (dBest ? 'best' : '') + '">';
         body += '<td>' + dt + (dBest ? ' <span class="badge">BEST</span>' : '') + '</td>';
-        body += '<td>' + pct(dv.cumReturn, 2) + '</td>';
-        body += '<td class="' + cls(dv.improvement) + '">' + pct(dv.improvement, 2) + '</td>';
+        body += '<td>' + pct(dvAnn, 1) + '</td>';
+        body += '<td>' + pct(dv.cumReturn, 1) + '</td>';
+        body += '<td class="' + cls(dvAnnDiff) + '">' + pct(dvAnnDiff, 1) + '</td>';
         body += '<td class="' + cls(dRelPct2) + '">' + pct(dRelPct2, 0) + '</td>';
         body += '<td>' + dv.maxDD.toFixed(2) + '%</td>';
         body += '<td class="' + ddCls2(dDDChg) + '">' + pct(dDDChg, 2) + '</td></tr>';
@@ -421,18 +642,21 @@ function buildReportHTML(r, mode) {
       var singleKeys = testTimes.length > 0 ? testTimes : Object.keys(r.single.times).sort();
       body += '<div class="section">';
       body += '<div class="section-title">Single \u2014 All Times (Replace EOD)</div>';
-      body += '<table><thead><tr><th>Time</th><th>Cum Return</th><th>vs EOD</th><th>% of EOD</th><th>Max Drawdown</th><th>DD vs EOD</th></tr></thead><tbody>';
+      body += '<table><thead><tr><th>Time</th><th>Ann Return</th><th>Cum Return</th><th>vs EOD</th><th>% of EOD</th><th>Max Drawdown</th><th>DD vs EOD</th></tr></thead><tbody>';
       for (var si = 0; si < singleKeys.length; si++) {
         var st = singleKeys[si];
         if (!r.single.times[st]) continue;
         var sv = r.single.times[st];
         var sBest = st === r.single.bestTime;
         var sDDChg = sv.maxDD - r.eod.maxDD;
-        var sRelPct2 = eodBase !== 0 ? (sv.improvement / Math.abs(eodBase)) * 100 : 0;
+        var svAnn = sv.annReturn != null ? sv.annReturn : ann(sv.cumReturn);
+        var svAnnDiff = svAnn != null && eodAnnRpt != null ? svAnn - eodAnnRpt : 0;
+        var sRelPct2 = eodAnnRpt != null && eodAnnRpt !== 0 ? (svAnnDiff / Math.abs(eodAnnRpt)) * 100 : 0;
         body += '<tr class="' + (sBest ? 'best' : '') + '">';
         body += '<td>' + st + (sBest ? ' <span class="badge">BEST</span>' : '') + '</td>';
-        body += '<td>' + pct(sv.cumReturn, 2) + '</td>';
-        body += '<td class="' + cls(sv.improvement) + '">' + pct(sv.improvement, 2) + '</td>';
+        body += '<td>' + pct(svAnn, 1) + '</td>';
+        body += '<td>' + pct(sv.cumReturn, 1) + '</td>';
+        body += '<td class="' + cls(svAnnDiff) + '">' + pct(svAnnDiff, 1) + '</td>';
         body += '<td class="' + cls(sRelPct2) + '">' + pct(sRelPct2, 0) + '</td>';
         body += '<td>' + sv.maxDD.toFixed(2) + '%</td>';
         body += '<td class="' + ddCls2(sDDChg) + '">' + pct(sDDChg, 2) + '</td></tr>';
@@ -441,13 +665,38 @@ function buildReportHTML(r, mode) {
       body += '</div>';
     }
 
-    // Walk-forward for combined
-    if (r.dual && r.dual.walkforward) {
-      body += buildWalkforwardSection(r.dual.walkforward, 'Dual @' + r.dual.bestTime, r.dual.allWalkforwardResults, r.dual.bestTime, r.dual.compositeScores);
+    // Cash breakdown
+    if (r.cash && r.cash.times && Object.keys(r.cash.times).length > 0) {
+      var cashKeys = testTimes.length > 0 ? testTimes : Object.keys(r.cash.times).sort();
+      body += '<div class="section">';
+      body += '<div class="section-title">Cash \u2014 All Times (Go to Cash Midday, Re-enter EOD)</div>';
+      body += '<table><thead><tr><th>Time</th><th>Ann Return</th><th>Cum Return</th><th>vs EOD</th><th>% of EOD</th><th>Max Drawdown</th><th>DD vs EOD</th></tr></thead><tbody>';
+      for (var ci = 0; ci < cashKeys.length; ci++) {
+        var ct = cashKeys[ci];
+        if (!r.cash.times[ct]) continue;
+        var cv = r.cash.times[ct];
+        var cBest = ct === r.cash.bestTime;
+        var cDDChg = cv.maxDD - r.eod.maxDD;
+        var cvAnn = cv.annReturn != null ? cv.annReturn : ann(cv.cumReturn);
+        var cvAnnDiff = cvAnn != null && eodAnnRpt != null ? cvAnn - eodAnnRpt : 0;
+        var cRelPct2 = eodAnnRpt != null && eodAnnRpt !== 0 ? (cvAnnDiff / Math.abs(eodAnnRpt)) * 100 : 0;
+        body += '<tr class="' + (cBest ? 'best' : '') + '">';
+        body += '<td>' + ct + (cBest ? ' <span class="badge">BEST</span>' : '') + '</td>';
+        body += '<td>' + pct(cvAnn, 1) + '</td>';
+        body += '<td>' + pct(cv.cumReturn, 1) + '</td>';
+        body += '<td class="' + cls(cvAnnDiff) + '">' + pct(cvAnnDiff, 1) + '</td>';
+        body += '<td class="' + cls(cRelPct2) + '">' + pct(cRelPct2, 0) + '</td>';
+        body += '<td>' + cv.maxDD.toFixed(2) + '%</td>';
+        body += '<td class="' + ddCls2(cDDChg) + '">' + pct(cDDChg, 2) + '</td></tr>';
+      }
+      body += '</tbody></table>';
+      body += '</div>';
     }
-    if (r.single && r.single.walkforward) {
-      body += buildWalkforwardSection(r.single.walkforward, 'Single @' + r.single.bestTime, r.single.allWalkforwardResults, r.single.bestTime, r.single.compositeScores);
-    }
+
+    // Walk-forward for combined (unified tabs)
+    if (r.dual) body += buildUnifiedWfSection(r.dual.allWalkforwardResults, r.dual.oosWalkforward, r.dual.compositeScores, r.dual.bestTime);
+    if (r.single) body += buildUnifiedWfSection(r.single.allWalkforwardResults, r.single.oosWalkforward, r.single.compositeScores, r.single.bestTime);
+    if (r.cash) body += buildUnifiedWfSection(r.cash.allWalkforwardResults, r.cash.oosWalkforward, r.cash.compositeScores, r.cash.bestTime);
   }
 
   return '<!DOCTYPE html>\n<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
@@ -535,6 +784,7 @@ async function handleRequest(req, res) {
         hasComposerKeys: analyzer.hasComposerKeys(),
         alpacaTimeframe: analyzer.CONFIG.ALPACA_TIMEFRAME,
         eodTime: analyzer.CONFIG.EOD_TIME,
+        baselineSource: analyzer.CONFIG.composerBaseline ? 'composer' : 'simulated',
         testTimes: analyzer.CONFIG.TEST_TIMES,
         maxIntradayDays: analyzer.CONFIG.MAX_INTRADAY_DAYS,
         dataSource: analyzer.CONFIG.dataSource,
@@ -618,7 +868,10 @@ async function handleRequest(req, res) {
     // --- API: Run analysis (SSE stream) ---
     if (pathname === '/api/analyze' && req.method === 'POST') {
       const body = await parseBody(req);
-      const { ids, mode = 'dual', walkforward = false, wfWindowSize, wfStepSize, dateStart, dateEnd } = body || {};
+      const { ids, mode = 'dual', walkforward = false, oosWalkforward = false,
+              composerBaseline = false,
+              wfWindowSize, wfStepSize, oosTrainWindowSize, wfMaxCandidates,
+              dateStart, dateEnd } = body || {};
 
       if (!ids || !Array.isArray(ids) || ids.length === 0) {
         return json({ error: 'ids array required' }, 400);
@@ -633,6 +886,10 @@ async function handleRequest(req, res) {
       analyzer.CONFIG.walkforward = !!walkforward;
       if (wfWindowSize) analyzer.CONFIG.wfWindowSize = parseInt(wfWindowSize) || 21;
       if (wfStepSize) analyzer.CONFIG.wfStepSize = parseInt(wfStepSize) || 21;
+      analyzer.CONFIG.oosWalkforward = !!oosWalkforward;
+      analyzer.CONFIG.composerBaseline = !!composerBaseline;
+      if (oosTrainWindowSize) analyzer.CONFIG.oosTrainWindowSize = parseInt(oosTrainWindowSize) || 63;
+      if (wfMaxCandidates) analyzer.CONFIG.wfMaxCandidates = parseInt(wfMaxCandidates) || 10;
 
       // Custom date range (null = use all available data)
       analyzer.CONFIG.dateStart = dateStart && /^\d{4}-\d{2}-\d{2}$/.test(dateStart) ? dateStart : null;
@@ -660,8 +917,9 @@ async function handleRequest(req, res) {
             }
           }
         } else {
-          // For dual/single, analyze one at a time for streaming progress
-          const fn = mode === 'single' ? analyzer.singleTimeAnalysis : analyzer.dualTimeAnalysis;
+          // For dual/single/cash, analyze one at a time for streaming progress
+          const fn = mode === 'cash' ? analyzer.cashTimeAnalysis
+            : mode === 'single' ? analyzer.singleTimeAnalysis : analyzer.dualTimeAnalysis;
           for (let i = 0; i < ids.length; i++) {
             if (closed.value) break;
             sseSend(res, 'progress', { current: i + 1, total: ids.length, id: ids[i] });
@@ -684,6 +942,8 @@ async function handleRequest(req, res) {
       } finally {
         analysisRunning = false;
         analyzer.CONFIG.walkforward = false;  // Reset after run
+        analyzer.CONFIG.oosWalkforward = false;
+        analyzer.CONFIG.composerBaseline = false;
         analyzer.CONFIG.dateStart = null;     // Reset custom date range
         analyzer.CONFIG.dateEnd = null;
       }
@@ -767,6 +1027,12 @@ async function handleRequest(req, res) {
         console.log(`Timeframe changed ${oldTimeframe} → ${body.alpacaTimeframe}: regenerated ${newTimes.length} test times`);
       }
 
+      // Baseline source setting
+      if (body.baselineSource && ['simulated', 'composer'].includes(body.baselineSource)) {
+        analyzer.CONFIG.composerBaseline = body.baselineSource === 'composer';
+        guiUpdates.baselineSource = body.baselineSource;
+      }
+
       // Persist to gui-settings.json
       if (Object.keys(guiUpdates).length > 0) {
         saveGUISettings(guiUpdates);
@@ -777,6 +1043,7 @@ async function handleRequest(req, res) {
         alpacaTimeframe: analyzer.CONFIG.ALPACA_TIMEFRAME,
         eodTime: analyzer.CONFIG.EOD_TIME,
         testTimes: analyzer.CONFIG.TEST_TIMES,
+        baselineSource: analyzer.CONFIG.composerBaseline ? 'composer' : 'simulated',
       });
       return;
     }
@@ -1176,10 +1443,14 @@ const FRONTEND_HTML = `<!DOCTYPE html>
       <select class="mode-select" id="modeSelect">
         <option value="dual">Dual Time (Intraday + EOD)</option>
         <option value="single">Single Time (Replace EOD)</option>
-        <option value="combined">Combined (Both Analyses)</option>
+        <option value="cash">Cash (Go to Cash Midday)</option>
+        <option value="combined">Combined (All Three Modes)</option>
       </select>
-      <label class="wf-toggle" title="Compute walk-forward consistency for the best time">
-        <input type="checkbox" id="wfToggle" checked> Walk-Forward
+      <label class="wf-toggle" title="Tier 1: Walk-forward consistency check">
+        <input type="checkbox" id="wfToggle" checked> Robustness Check
+      </label>
+      <label class="wf-toggle" title="Walk-Forward Test: True out-of-sample (slower, top 10 candidates)">
+        <input type="checkbox" id="oosWfToggle"> Walk-Forward Test
       </label>
       <div class="date-range-row">
         <label class="date-range-toggle" title="Limit analysis to a specific date range">
@@ -1229,8 +1500,17 @@ const FRONTEND_HTML = `<!DOCTYPE html>
         </select>
       </div>
       <div class="modal-row">
+        <label>EOD Baseline</label>
+        <select id="settingBaseline" onchange="onBaselineChange()">
+          <option value="simulated">Custom Yahoo EOD (simulated strategy evaluation)</option>
+          <option value="composer">Composer Backtest (exact Xignite prices via API)</option>
+        </select>
+        <div class="hint" id="baselineHint">Composer Backtest uses Composer's actual holdings and Xignite prices. Requires Composer API keys.</div>
+      </div>
+      <div class="modal-row" id="eodTimeRow">
         <label>EOD Time</label>
         <select id="settingEod"></select>
+        <div class="hint">Only applies to Custom Yahoo mode. Composer Backtest uses Composer's own trading window.</div>
       </div>
       <div class="modal-actions">
         <button class="cancel" onclick="closeSettings()">Cancel</button>
@@ -1341,12 +1621,14 @@ function updateConfigUI() {
   status.innerHTML = [
     '<div class="row"><span class="status-dot ' + (config.hasAlpacaKeys ? 'green' : 'red') + '"></span> Alpaca: ' + (config.hasAlpacaKeys ? 'Connected' : 'Not configured') + '</div>',
     '<div class="row"><span class="status-dot ' + (config.hasComposerKeys ? 'green' : 'red') + '"></span> Composer: ' + (config.hasComposerKeys ? 'Connected' : 'Not configured') + '</div>',
-    '<div class="row">Bars: ' + (config.alpacaTimeframe || '15Min') + ' | EOD: ' + (config.eodTime || '15:45') + ' | Times: ' + testTimesCount + '</div>',
+    '<div class="row">Bars: ' + (config.alpacaTimeframe || '15Min') + ' | EOD: ' + (config.baselineSource === 'composer' ? 'Composer Backtest' : (config.eodTime || '15:45') + ' (Yahoo)') + ' | Times: ' + testTimesCount + '</div>',
   ].join('');
 
   // Settings modal - General tab
   document.getElementById('settingTimeframe').value = config.alpacaTimeframe || '15Min';
   buildEodOptions();
+  document.getElementById('settingBaseline').value = config.baselineSource || 'simulated';
+  onBaselineChange();
 
   // API Keys tab hints
   if (config.alpacaKeyHint) document.getElementById('hintAlpacaKey').textContent = 'Current: ' + config.alpacaKeyHint;
@@ -1546,7 +1828,9 @@ async function runAnalysis() {
 
   try {
     var wfEnabled = document.getElementById('wfToggle').checked;
-    var fetchBody = { ids: ids, mode: mode, walkforward: wfEnabled };
+    var oosEnabled = document.getElementById('oosWfToggle') ? document.getElementById('oosWfToggle').checked : false;
+    var cbEnabled = config.baselineSource === 'composer';
+    var fetchBody = { ids: ids, mode: mode, walkforward: wfEnabled, oosWalkforward: oosEnabled, composerBaseline: cbEnabled };
     if (document.getElementById('dateRangeToggle').checked) {
       var ds = document.getElementById('dateStart').value;
       var de = document.getElementById('dateEnd').value;
@@ -1563,6 +1847,7 @@ async function runAnalysis() {
     var decoder = new TextDecoder();
     var buffer = '';
 
+    var eventType = null;
     while (true) {
       var chunk = await reader.read();
       if (chunk.done) break;
@@ -1571,8 +1856,6 @@ async function runAnalysis() {
       // Parse SSE events from buffer
       var lines = buffer.split('\\n');
       buffer = lines.pop(); // Keep incomplete line in buffer
-
-      var eventType = null;
       for (var li = 0; li < lines.length; li++) {
         var line = lines[li];
         if (line.startsWith('event: ')) {
@@ -1581,7 +1864,9 @@ async function runAnalysis() {
           try {
             var evData = JSON.parse(line.slice(6));
             handleSSE(eventType, evData, ids.length);
-          } catch (pe) {}
+          } catch (pe) {
+            console.error('SSE parse/handle error:', pe, 'event:', eventType, 'data length:', line.length);
+          }
           eventType = null;
         }
       }
@@ -1704,18 +1989,25 @@ function renderSummaryTable(results, mode) {
     { key: 'pctImprove', label: '% Improve', cls: 'num' },
   ];
 
+  function annualize(cumRet, days) {
+    if (cumRet == null || !days || days <= 0) return null;
+    var years = days / 252;
+    if (years <= 0) return null;
+    return (Math.pow(1 + cumRet / 100, 1 / years) - 1) * 100;
+  }
+
   // Build rows data
   var rows = results.map(function(r) {
-    var eodRet = r.eod.cumReturn;
     var bestData = r.times[r.bestTime] || r.eod;
-    var bestRet = bestData.cumReturn;
-    var diff = r.bestImprovement;
-    var pctImprove = eodRet !== 0 ? (diff / Math.abs(eodRet)) * 100 : 0;
+    var eodAnn = r.eod.annReturn != null ? r.eod.annReturn : annualize(r.eod.cumReturn, r.tradingDays);
+    var bestAnn = bestData.annReturn != null ? bestData.annReturn : annualize(bestData.cumReturn, r.tradingDays);
+    var diff = bestAnn != null && eodAnn != null ? bestAnn - eodAnn : r.bestImprovement;
+    var pctImprove = eodAnn != null && eodAnn !== 0 ? (diff / Math.abs(eodAnn)) * 100 : 0;
     var ddChange = bestData.maxDD - r.eod.maxDD;
     return {
       id: r.id, name: r.name, from: fmtStartDate(r.dateRange), days: r.tradingDays,
       dateRange: r.dateRange, bestTime: r.bestTime,
-      ddChg: ddChange, eod: eodRet, best: bestRet, diff: diff, pctImprove: pctImprove,
+      ddChg: ddChange, eod: eodAnn, best: bestAnn, diff: diff, pctImprove: pctImprove,
       highlight: pctImprove > 10, recommendation: r.recommendation,
     };
   });
@@ -1769,6 +2061,13 @@ function renderSummaryTable(results, mode) {
 }
 
 function renderCombinedSummaryTable(results) {
+  function annualize(cumRet, days) {
+    if (cumRet == null || !days || days <= 0) return null;
+    var years = days / 252;
+    if (years <= 0) return null;
+    return (Math.pow(1 + cumRet / 100, 1 / years) - 1) * 100;
+  }
+
   var cols = [
     { key: 'name', label: 'Strategy', cls: '' },
     { key: 'from', label: 'From', cls: 'num' },
@@ -1781,6 +2080,10 @@ function renderCombinedSummaryTable(results) {
     { key: 'singleRet', label: 'Single Return', cls: 'num' },
     { key: 'singleRelImp', label: 'Single +/-', cls: 'num' },
     { key: 'singleScore', label: 'Single Score', cls: 'num' },
+    { key: 'cashTime', label: 'Cash Best', cls: 'num' },
+    { key: 'cashRet', label: 'Cash Return', cls: 'num' },
+    { key: 'cashRelImp', label: 'Cash +/-', cls: 'num' },
+    { key: 'cashScore', label: 'Cash Score', cls: 'num' },
   ];
 
   var getQL = function(s) {
@@ -1791,18 +2094,25 @@ function renderCombinedSummaryTable(results) {
   };
 
   var rows = results.map(function(r) {
-    var eod = r.eod.cumReturn;
-    var dualRelImp = eod !== 0 ? (r.dual.improvement / Math.abs(eod)) * 100 : 0;
-    var singleRelImp = eod !== 0 ? (r.single.improvement / Math.abs(eod)) * 100 : 0;
+    var eodAnn = r.eod.annReturn != null ? r.eod.annReturn : annualize(r.eod.cumReturn, r.tradingDays);
+    var dualAnn = r.dual.bestAnnReturn != null ? r.dual.bestAnnReturn : annualize(r.dual.bestReturn, r.tradingDays);
+    var singleAnn = r.single.bestAnnReturn != null ? r.single.bestAnnReturn : annualize(r.single.bestReturn, r.tradingDays);
+    var cashAnn = (r.cash && r.cash.bestAnnReturn != null) ? r.cash.bestAnnReturn : (r.cash ? annualize(r.cash.bestReturn, r.tradingDays) : null);
+    var dualRelImp = eodAnn != null && eodAnn !== 0 ? ((dualAnn - eodAnn) / Math.abs(eodAnn)) * 100 : 0;
+    var singleRelImp = eodAnn != null && eodAnn !== 0 ? ((singleAnn - eodAnn) / Math.abs(eodAnn)) * 100 : 0;
+    var cashRelImp = eodAnn != null && eodAnn !== 0 && cashAnn != null ? ((cashAnn - eodAnn) / Math.abs(eodAnn)) * 100 : 0;
     var dcs = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
     var scs = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
+    var ccs = (r.cash && r.cash.compositeScores && r.cash.bestTime) ? r.cash.compositeScores[r.cash.bestTime] : null;
     return {
       id: r.id, name: r.name, from: fmtStartDate(r.dateRange), days: r.tradingDays,
-      dateRange: r.dateRange, eod: eod,
-      dualTime: r.dual.bestTime, dualRet: r.dual.bestReturn, dualRelImp: dualRelImp,
+      dateRange: r.dateRange, eod: eodAnn,
+      dualTime: r.dual.bestTime, dualRet: dualAnn, dualRelImp: dualRelImp,
       dualScore: dcs ? dcs.total : 0, dualViable: dualRelImp >= 10,
-      singleTime: r.single.bestTime, singleRet: r.single.bestReturn, singleRelImp: singleRelImp,
+      singleTime: r.single.bestTime, singleRet: singleAnn, singleRelImp: singleRelImp,
       singleScore: scs ? scs.total : 0, singleViable: singleRelImp >= 10,
+      cashTime: r.cash ? r.cash.bestTime : '-', cashRet: cashAnn, cashRelImp: cashRelImp,
+      cashScore: ccs ? ccs.total : 0, cashViable: cashRelImp >= 10,
     };
   });
 
@@ -1846,6 +2156,15 @@ function renderCombinedSummaryTable(results) {
     } else {
       html += '<td class="num" style="color:#f85149;font-size:0.8em">Not Recommended</td>';
     }
+    html += '<td class="num">' + (r.cashTime || '-') + '</td>';
+    html += '<td class="num" style="color:#e6edf3">' + fmtPct(r.cashRet, 0) + '</td>';
+    html += '<td class="num ' + valClass(r.cashRelImp) + '">' + fmtPct(r.cashRelImp, 0) + '</td>';
+    if (r.cashScore > 0 && r.cashViable) {
+      var cql = getQL(r.cashScore);
+      html += '<td class="num" style="font-weight:700;color:' + cql.htmlColor + '">' + r.cashScore + '<br><span style="opacity:0.5;font-size:0.8em;font-weight:400">' + cql.label + '</span></td>';
+    } else {
+      html += '<td class="num" style="color:#f85149;font-size:0.8em">Not Recommended</td>';
+    }
     html += '</tr>';
   }
 
@@ -1877,9 +2196,16 @@ function renderSingleWfPanel(wf, altLabel) {
   // Summary line
   var vColor = s.verdict === 'CONSISTENT' ? '#3fb950' : s.verdict === 'EPISODIC' ? '#d29922' : '#f85149';
   html += '<div style="margin-top:8px;font-size:12px;color:var(--text2,#8b949e)">';
+  // Annualize robustness check alpha
+  var rcComp2 = 1;
+  for (var rci2 = 0; rci2 < wf.windows.length; rci2++) rcComp2 *= (1 + wf.windows[rci2].alpha / 100);
+  var rcCum3 = (rcComp2 - 1) * 100;
+  var rcYrs2 = (wf.windows.length * 21) / 252;
+  var rcAnn3 = rcYrs2 > 0 ? (Math.pow(1 + rcCum3 / 100, 1 / rcYrs2) - 1) * 100 : null;
   html += '<span style="color:' + vColor + ';font-weight:600">' + s.verdict + '</span> \\u2014 ';
   html += s.wins + '/' + s.total + ' windows (' + (s.winRate * 100).toFixed(1) + '%)';
   html += ' | Avg alpha: ' + fmtPct(s.avgAlpha, 2);
+  if (rcAnn3 != null) html += ' | Ann alpha: ' + fmtPct(rcAnn3, 1);
   if (s.total >= 3) {
     html += ' | Recent: ' + s.recentWins + '/' + Math.min(3, s.total) + ' wins';
   }
@@ -1890,7 +2216,7 @@ function renderSingleWfPanel(wf, altLabel) {
 
 function renderWalkforwardHTML(wf, altLabel, sectionLabel, allWfResults, bestTime, compositeScores) {
   if (!wf || !wf.summary || wf.summary.verdict === 'INSUFFICIENT_DATA') return '';
-  var heading = sectionLabel ? sectionLabel + ' Walk-Forward Consistency' : 'Walk-Forward Consistency';
+  var heading = sectionLabel ? sectionLabel + ' Robustness Check (post-hoc slicing)' : 'Robustness Check (post-hoc slicing)';
 
   // Collect times that have valid WF results
   var wfTimes = [];
@@ -1919,7 +2245,7 @@ function renderWalkforwardHTML(wf, altLabel, sectionLabel, allWfResults, bestTim
       var isBest = t === bestTime;
       var vDot = twf.summary.verdict === 'CONSISTENT' ? '#3fb950' : twf.summary.verdict === 'EPISODIC' ? '#d29922' : '#f85149';
       var cs = compositeScores && compositeScores[t];
-      var wfScoreLabel = cs && cs.wfScore !== null ? ' (' + cs.wfScore + ')' : '';
+      var wfScoreLabel = cs ? (cs.robustnessScore !== null || cs.wfScore !== null ? ' (' + cs.total + ')' : '') : '';
       var activeStyle = isBest
         ? 'background:var(--accent,#58a6ff);color:#0d1117;font-weight:600'
         : 'background:var(--bg2,#21262d);color:var(--text2,#8b949e)';
@@ -1952,6 +2278,159 @@ function renderWalkforwardHTML(wf, altLabel, sectionLabel, allWfResults, bestTim
   return html;
 }
 
+function renderOOSWalkforwardHTML(oos) {
+  if (!oos || !oos.summary || oos.summary.verdict === 'INSUFFICIENT_DATA') return '';
+  var s = oos.summary;
+  var html = '<div style="margin-top:16px">';
+  html += '<div style="font-size:12px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Walk-Forward Test (true OOS)</div>';
+
+  // Windows table
+  html += '<table class="detail-table"><thead><tr><th>Training Period</th><th>Chosen</th><th>Test Period</th><th>OOS Alpha</th><th>Win?</th></tr></thead><tbody>';
+  for (var i = 0; i < oos.windows.length; i++) {
+    var w = oos.windows[i];
+    var cls2 = w.win ? 'pos' : 'neg';
+    html += '<tr>';
+    html += '<td style="white-space:nowrap;font-size:12px">' + w.trainStart + ' \\u2192 ' + w.trainEnd.slice(5) + '</td>';
+    html += '<td>' + w.trainBestTime + '</td>';
+    html += '<td style="white-space:nowrap;font-size:12px">' + w.testStart + ' \\u2192 ' + w.testEnd.slice(5) + '</td>';
+    html += '<td class="' + cls2 + '">' + fmtPct(w.testAlpha, 1) + '</td>';
+    html += '<td class="' + cls2 + '">' + (w.win ? '+' : '\\u2212') + '</td>';
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+
+  // Summary
+  var vColor = s.verdict === 'OOS_CONFIRMED' ? '#3fb950' : s.verdict === 'OOS_DEGRADED' ? '#d29922' : '#f85149';
+  html += '<div style="margin-top:8px;font-size:12px;color:var(--text2,#8b949e)">';
+  html += '<span style="color:' + vColor + ';font-weight:600">' + s.verdict.replace('OOS_', '') + '</span> \\u2014 ';
+  html += s.wins + '/' + s.total + ' (' + (s.oosWinRate * 100).toFixed(1) + '%)';
+  html += ' | Avg alpha: ' + fmtPct(s.oosAvgAlpha, 2);
+  if (s.oosAnnAlpha != null) html += ' | Ann: ' + fmtPct(s.oosAnnAlpha, 1);
+  html += '<br>Most selected: <strong>' + s.oosBestTime + '</strong> (' + s.oosBestTimeCount + '/' + s.total + ')';
+  if (s.degradationRatio != null) {
+    var dLabel = s.degradationRatio >= 0.75 ? 'EXCELLENT' : s.degradationRatio >= 0.50 ? 'ACCEPTABLE' : s.degradationRatio >= 0.25 ? 'SIGNIFICANT' : 'SEVERE';
+    var dColor = s.degradationRatio >= 0.50 ? '#3fb950' : s.degradationRatio >= 0.25 ? '#d29922' : '#f85149';
+    html += ' | Degradation: <span style="color:' + dColor + '">' + s.degradationRatio.toFixed(2) + ' (' + dLabel + ')</span>';
+  }
+  html += '</div>';
+
+  // Neighbor peak
+  if (oos.neighborPeak && Object.keys(oos.neighborPeak).length > 0) {
+    var peakTimes = Object.keys(oos.neighborPeak).sort();
+    html += '<div style="margin-top:8px;font-family:monospace;font-size:11px">';
+    for (var pi = 0; pi < peakTimes.length; pi++) {
+      var pt = peakTimes[pi];
+      var pp = oos.neighborPeak[pt];
+      var ftStr = pp.fullBTImprovement != null ? fmtPct(pp.fullBTImprovement, 1) : 'n/a';
+      var osStr = pp.isCandidate && pp.timesChosen > 0 ? fmtPct(pp.oosAvgAlpha, 1) + ' (' + pp.timesChosen + 'x)' : (pp.isCandidate ? 'never chosen' : 'not tested');
+      var marker = pp.isOOSBest ? ' \\u25C0 OOS BEST' : '';
+      html += pt + ': BT ' + ftStr + ' / OOS ' + osStr + marker + '<br>';
+    }
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function renderCandidateOOSPanelLive(candidateOOS, time) {
+  if (!candidateOOS || !candidateOOS.windows || candidateOOS.windows.length === 0) return '';
+  var h = '<table class="detail-table"><thead><tr><th>Test Period</th><th>OOS Alpha</th><th>Win?</th><th>Training Chose</th></tr></thead><tbody>';
+  for (var i = 0; i < candidateOOS.windows.length; i++) {
+    var w = candidateOOS.windows[i];
+    var c2 = w.win ? 'pos' : 'neg';
+    h += '<tr><td style="white-space:nowrap;font-size:12px">' + w.testStart + ' \\u2192 ' + w.testEnd.slice(5) + '</td>';
+    h += '<td class="' + c2 + '">' + fmtPct(w.testAlpha, 1) + '</td>';
+    h += '<td class="' + c2 + '">' + (w.win ? '+' : '\\u2212') + '</td>';
+    h += '<td style="font-size:11px;color:var(--text2,#8b949e)">' + (w.chosenInTraining || '\\u2014') + '</td></tr>';
+  }
+  h += '</tbody></table>';
+  h += '<div style="font-size:12px;margin-top:6px;color:var(--text2,#8b949e)">';
+  // Annualize per-candidate OOS alpha
+  var cComp = 1;
+  for (var ci = 0; ci < candidateOOS.windows.length; ci++) cComp *= (1 + candidateOOS.windows[ci].testAlpha / 100);
+  var cCum = (cComp - 1) * 100;
+  var cYears = (candidateOOS.windows.length * 21) / 252;
+  var cAnn = cYears > 0 ? (Math.pow(1 + cCum / 100, 1 / cYears) - 1) * 100 : null;
+  h += (candidateOOS.winRate * 100).toFixed(0) + '% win rate | Avg alpha: ' + fmtPct(candidateOOS.avgAlpha, 2);
+  if (cAnn != null) h += ' | Ann alpha: ' + fmtPct(cAnn, 1);
+  if (candidateOOS.timesChosenInTraining > 0) h += ' | Chosen in training: ' + candidateOOS.timesChosenInTraining + 'x';
+  h += '</div>';
+  return h;
+}
+
+function renderUnifiedWfHTML(allWfResults, oosWalkforward, compositeScores, bestTime) {
+  var hasT1 = allWfResults && typeof allWfResults === 'object' && Object.keys(allWfResults).length > 0;
+  var hasT2 = oosWalkforward && oosWalkforward.perCandidateOOS && Object.keys(oosWalkforward.perCandidateOOS).length > 0;
+  if (!hasT1 && !hasT2) return '';
+
+  var candidateTimes = [];
+  var seen = {};
+  if (hasT1) { for (var k in allWfResults) { if (allWfResults[k] && allWfResults[k].summary && allWfResults[k].summary.verdict !== 'INSUFFICIENT_DATA' && !seen[k]) { candidateTimes.push(k); seen[k] = 1; } } }
+  if (hasT2) { for (var k in oosWalkforward.perCandidateOOS) { if (!seen[k]) { candidateTimes.push(k); seen[k] = 1; } } }
+  candidateTimes.sort();
+  if (candidateTimes.length === 0) return '';
+
+  var uid = 'uwf_' + Math.random().toString(36).slice(2, 8);
+  var heading = hasT1 && hasT2 ? 'Walk-Forward Analysis' : hasT1 ? 'Robustness Check (post-hoc slicing)' : 'Walk-Forward Test (true OOS)';
+  var html = '<div style="margin-top:16px"><div style="font-size:12px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">' + heading + '</div>';
+
+  // Tab bar
+  if (candidateTimes.length > 1) {
+    html += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px">';
+    for (var i = 0; i < candidateTimes.length; i++) {
+      var t = candidateTimes[i];
+      var cs = compositeScores && compositeScores[t];
+      var isBest = t === bestTime;
+      var vDot = 'var(--text2,#8b949e)';
+      if (hasT1 && allWfResults[t] && allWfResults[t].summary) {
+        var v = allWfResults[t].summary.verdict;
+        vDot = v === 'CONSISTENT' ? '#3fb950' : v === 'EPISODIC' ? '#d29922' : '#f85149';
+      }
+      var scoreLabel = cs ? ' (' + cs.total + ')' : '';
+      var activeStyle = isBest ? 'background:var(--accent,#58a6ff);color:#0d1117;font-weight:600' : 'background:var(--bg2,#21262d);color:var(--text2,#8b949e)';
+      html += '<button class="wf-tab" data-uid="' + uid + '" data-time="' + t + '" '
+        + 'style="border:1px solid var(--border,#30363d);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;' + activeStyle + '" '
+        + 'onclick="switchWfTab(this,\\'' + uid + '\\',\\'' + t + '\\')">'
+        + '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:' + vDot + ';margin-right:4px;vertical-align:middle"></span>'
+        + t + (isBest ? ' BEST' : '') + scoreLabel + '</button>';
+    }
+    html += '</div>';
+  }
+
+  // Panels
+  for (var i = 0; i < candidateTimes.length; i++) {
+    var t = candidateTimes[i];
+    var isBest = t === bestTime;
+    var showStyle = candidateTimes.length > 1 ? (isBest ? '' : 'display:none') : '';
+    html += '<div class="wf-panel" data-uid="' + uid + '" data-time="' + t + '" style="' + showStyle + '">';
+
+    var cs = compositeScores && compositeScores[t];
+    if (cs) {
+      html += '<div style="font-size:12px;margin-bottom:8px;color:var(--text2,#8b949e)">Score: <strong style="color:var(--text1,#e6edf3)">' + cs.total + '/100</strong>';
+      html += ' \\u2014 Return ' + cs.returnScore + ' | DD ' + cs.ddScore + ' | Neighbors ' + cs.neighborScore;
+      if (cs.robustnessScore !== null) html += ' | RC ' + cs.robustnessScore;
+      if (cs.wfScore !== null) html += ' | OOS ' + cs.wfScore;
+      html += '</div>';
+    }
+
+    if (hasT1 && allWfResults[t] && allWfResults[t].summary && allWfResults[t].summary.verdict !== 'INSUFFICIENT_DATA') {
+      html += '<div style="font-size:11px;font-weight:600;text-transform:uppercase;color:var(--text2,#8b949e);margin-bottom:4px">Robustness Check (post-hoc slicing)</div>';
+      html += renderSingleWfPanel(allWfResults[t], '@' + t);
+    }
+
+    if (hasT2 && oosWalkforward.perCandidateOOS[t]) {
+      html += '<div style="font-size:11px;font-weight:600;text-transform:uppercase;color:var(--text2,#8b949e);margin:8px 0 4px">Walk-Forward Test (true OOS)</div>';
+      html += renderCandidateOOSPanelLive(oosWalkforward.perCandidateOOS[t], t);
+    }
+
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
 function renderDetailCard(r, mode) {
   var eodTime = config.eodTime || '15:45';
   var testTimes = config.testTimes || [];
@@ -1967,15 +2446,25 @@ function renderDetailCard(r, mode) {
   html += '<div class="detail-body">';
 
   // EOD baseline
+  function annualizeGui(cumRet, days) {
+    if (cumRet == null || !days || days <= 0) return null;
+    var years = days / 252;
+    if (years <= 0) return null;
+    return (Math.pow(1 + cumRet / 100, 1 / years) - 1) * 100;
+  }
+
   html += '<div style="margin-bottom:8px;font-size:13px">';
-  html += '<strong>Baseline (EOD ' + eodTime + '):</strong> Return: ';
-  html += '<span class="' + valClass(r.eod.cumReturn) + '">' + fmtPct(r.eod.cumReturn, 1) + '</span>';
+  var eodAnnGui = r.eod.annReturn != null ? r.eod.annReturn : annualizeGui(r.eod.cumReturn, r.tradingDays);
+  var cumFmtGui = ' (' + fmtPct(r.eod.cumReturn, 1) + ' cum.)';
+  var blLabel2 = r.baselineSource === 'composer' ? 'Baseline (Composer Backtest):' : 'Baseline (EOD ' + eodTime + '):';
+  html += '<strong>' + blLabel2 + '</strong> Return: ';
+  html += '<span class="' + valClass(r.eod.cumReturn) + '">' + fmtPct(eodAnnGui, 1) + ' ann.' + cumFmtGui + '</span>';
   html += ' | Max DD: <span class="neg">' + r.eod.maxDD.toFixed(1) + '%</span>';
   html += '</div>';
 
   // Times table
   html += '<table class="detail-table"><thead><tr>';
-  html += '<th>Time</th><th>Cum Return</th><th>vs EOD</th><th>Max Drawdown</th><th>DD vs EOD</th>';
+  html += '<th>Time</th><th>Ann Return</th><th>Cum Return</th><th>vs EOD</th><th>Max Drawdown</th><th>DD vs EOD</th>';
   html += '</tr></thead><tbody>';
 
   for (var ti = 0; ti < testTimes.length; ti++) {
@@ -1984,10 +2473,13 @@ function renderDetailCard(r, mode) {
     var t = r.times[time];
     var isBest = time === r.bestTime;
     var ddChg = t.maxDD - r.eod.maxDD;
+    var annGui = t.annReturn != null ? t.annReturn : annualizeGui(t.cumReturn, r.tradingDays);
+    var annDiffGui = annGui != null && eodAnnGui != null ? annGui - eodAnnGui : t.improvement;
     html += '<tr class="' + (isBest ? 'best' : '') + '">';
     html += '<td>' + time + (isBest ? ' (BEST)' : '') + '</td>';
+    html += '<td>' + fmtPct(annGui, 1) + '</td>';
     html += '<td>' + fmtPct(t.cumReturn, 1) + '</td>';
-    html += '<td class="' + valClass(t.improvement) + '">' + fmtPct(t.improvement, 1) + '</td>';
+    html += '<td class="' + valClass(annDiffGui) + '">' + fmtPct(annDiffGui, 1) + '</td>';
     html += '<td>' + t.maxDD.toFixed(1) + '%</td>';
     html += '<td class="' + valClass(ddChg, true) + '">' + fmtNum(ddChg, 1) + '</td>';
     html += '</tr>';
@@ -2010,15 +2502,14 @@ function renderDetailCard(r, mode) {
   // Composite score breakdown
   if (r.compositeScores && r.bestTime && r.compositeScores[r.bestTime]) {
     var cs = r.compositeScores[r.bestTime];
-    var wfPart = cs.wfScore !== null ? ' \\u00B7 WF ' + cs.wfScore : '';
+    var rcPart = cs.robustnessScore !== null ? ' \\u00B7 RC ' + cs.robustnessScore : '';
+    var oosPart = cs.wfScore !== null ? ' \\u00B7 OOS ' + cs.wfScore : '';
+    var wfPart = rcPart + oosPart;
     html += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">Selection score: <strong>' + cs.total + '/100</strong> (Return ' + cs.returnScore + ', DD ' + cs.ddScore + ', Neighbors ' + cs.neighborScore + wfPart + ')</div>';
   }
 
   // Walk-forward section
-  if (r.walkforward) {
-    var wfLabel = mode === 'dual' ? 'Dual' : '@' + r.bestTime;
-    html += renderWalkforwardHTML(r.walkforward, wfLabel, null, r.allWalkforwardResults, r.bestTime, r.compositeScores);
-  }
+  html += renderUnifiedWfHTML(r.allWalkforwardResults, r.oosWalkforward, r.compositeScores, r.bestTime);
 
   html += '</div></div>';
   return html;
@@ -2034,16 +2525,27 @@ function renderCombinedDetailCard(r) {
   html += '<div class="detail-info">' + r.tradingDays + ' trading days | ' + fmtDateRange(r.dateRange) + '</div></div>';
   html += '<span class="arrow">\\u25B6</span></div>';
 
+  function annualizeGui2(cumRet, days) {
+    if (cumRet == null || !days || days <= 0) return null;
+    var years = days / 252;
+    if (years <= 0) return null;
+    return (Math.pow(1 + cumRet / 100, 1 / years) - 1) * 100;
+  }
+
   html += '<div class="detail-body">';
   html += '<div style="margin-bottom:8px;font-size:13px">';
-  html += '<strong>Baseline (EOD ' + eodTime + '):</strong> Return: ';
-  html += '<span class="' + valClass(r.eod.cumReturn) + '">' + fmtPct(r.eod.cumReturn, 1) + '</span>';
+  var eodAnnGui2 = r.eod.annReturn != null ? r.eod.annReturn : annualizeGui2(r.eod.cumReturn, r.tradingDays);
+  var cumFmtGui2 = ' (' + fmtPct(r.eod.cumReturn, 1) + ' cum.)';
+  var blLabel2 = r.baselineSource === 'composer' ? 'Baseline (Composer Backtest):' : 'Baseline (EOD ' + eodTime + '):';
+  html += '<strong>' + blLabel2 + '</strong> Return: ';
+  html += '<span class="' + valClass(r.eod.cumReturn) + '">' + fmtPct(eodAnnGui2, 1) + ' ann.' + cumFmtGui2 + '</span>';
   html += ' | Max DD: <span class="neg">' + r.eod.maxDD.toFixed(1) + '%</span>';
   html += '</div>';
 
   // Determine recommendation first
   var dcsData = (r.dual && r.dual.compositeScores && r.dual.bestTime) ? r.dual.compositeScores[r.dual.bestTime] : null;
   var scsData = (r.single && r.single.compositeScores && r.single.bestTime) ? r.single.compositeScores[r.single.bestTime] : null;
+  var ccsData = (r.cash && r.cash.compositeScores && r.cash.bestTime) ? r.cash.compositeScores[r.cash.bestTime] : null;
   var getQL2 = function(s) {
     if (s >= 75) return { label: 'STRONG', htmlColor: '#3fb950', bgColor: 'rgba(63,185,80,0.12)', borderColor: 'rgba(63,185,80,0.3)' };
     if (s >= 55) return { label: 'GOOD', htmlColor: '#58a6ff', bgColor: 'rgba(88,166,255,0.12)', borderColor: 'rgba(88,166,255,0.3)' };
@@ -2053,43 +2555,61 @@ function renderCombinedDetailCard(r) {
   var eodAbs2 = Math.abs(r.eod.cumReturn);
   var dRelPct = eodAbs2 > 1 ? (r.dual.improvement / eodAbs2) * 100 : r.dual.improvement * 10;
   var sRelPct = eodAbs2 > 1 ? (r.single.improvement / eodAbs2) * 100 : r.single.improvement * 10;
+  var cRelPct = r.cash ? (eodAbs2 > 1 ? (r.cash.improvement / eodAbs2) * 100 : r.cash.improvement * 10) : -Infinity;
   var dv2 = dRelPct >= 10;
   var sv2 = sRelPct >= 10;
-  var dualCS2 = dcsData ? dcsData.total : 0;
-  var singleCS2 = scsData ? scsData.total : 0;
-  var bm2, bs2, bi2, br2;
-  if (dv2 && sv2) {
-    if (dualCS2 >= singleCS2) { bm2 = 'Dual'; bs2 = dualCS2; bi2 = r.dual.improvement; br2 = dRelPct; }
-    else { bm2 = 'Single'; bs2 = singleCS2; bi2 = r.single.improvement; br2 = sRelPct; }
-  } else if (dv2) { bm2 = 'Dual'; bs2 = dualCS2; bi2 = r.dual.improvement; br2 = dRelPct; }
-  else if (sv2) { bm2 = 'Single'; bs2 = singleCS2; bi2 = r.single.improvement; br2 = sRelPct; }
-  else { bm2 = null; bs2 = 0; bi2 = 0; br2 = 0; }
+  var cv2 = cRelPct >= 10;
+
+  // Build candidates and pick best by score
+  var cands2 = [];
+  if (dv2) cands2.push({ mode: 'Dual', score: dcsData ? dcsData.total : 0, imp: r.dual.improvement, rel: dRelPct, time: r.dual.bestTime });
+  if (sv2) cands2.push({ mode: 'Single', score: scsData ? scsData.total : 0, imp: r.single.improvement, rel: sRelPct, time: r.single.bestTime });
+  if (cv2) cands2.push({ mode: 'Cash', score: ccsData ? ccsData.total : 0, imp: r.cash.improvement, rel: cRelPct, time: r.cash.bestTime });
+  cands2.sort(function(a, b) { return b.score - a.score; });
+  var bm2 = cands2.length > 0 ? cands2[0].mode : null;
+  var bs2 = cands2.length > 0 ? cands2[0].score : 0;
+  var bi2 = cands2.length > 0 ? cands2[0].imp : 0;
+  var br2 = cands2.length > 0 ? cands2[0].rel : 0;
+  var bt2 = cands2.length > 0 ? cands2[0].time : '';
 
   if (!bm2) {
     // NOT RECOMMENDED — show prominently, skip score boxes
     html += '<div class="recommendation warning">NOT RECOMMENDED - Improvement too small relative to EOD returns</div>';
   } else {
     // Show score boxes then recommendation
-    if (dcsData || scsData) {
-      html += '<div style="display:flex;gap:8px;margin-bottom:10px">';
+    if (dcsData || scsData || ccsData) {
+      html += '<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">';
       if (dcsData) {
         var dq2 = getQL2(dcsData.total);
-        html += '<div style="flex:1;padding:10px 12px;border-radius:6px;background:' + dq2.bgColor + ';border:1px solid ' + dq2.borderColor + ';line-height:1.6">';
+        html += '<div style="flex:1;min-width:180px;padding:10px 12px;border-radius:6px;background:' + dq2.bgColor + ';border:1px solid ' + dq2.borderColor + ';line-height:1.6">';
         html += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Dual @ ' + r.dual.bestTime + '</div>';
         html += '<span style="font-size:20px;font-weight:700;color:' + dq2.htmlColor + '">' + dq2.label + ' ' + dcsData.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
         html += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
         html += 'Return ' + dcsData.returnScore + ' \\u00B7 DD ' + dcsData.ddScore + ' \\u00B7 Neighbors ' + dcsData.neighborScore;
-        if (dcsData.wfScore !== null) html += ' \\u00B7 WF ' + dcsData.wfScore;
+        if (dcsData.robustnessScore !== null) html += ' \\u00B7 RC ' + dcsData.robustnessScore;
+        if (dcsData.wfScore !== null) html += ' \\u00B7 OOS ' + dcsData.wfScore;
         html += '</div></div>';
       }
       if (scsData) {
         var sq2 = getQL2(scsData.total);
-        html += '<div style="flex:1;padding:10px 12px;border-radius:6px;background:' + sq2.bgColor + ';border:1px solid ' + sq2.borderColor + ';line-height:1.6">';
+        html += '<div style="flex:1;min-width:180px;padding:10px 12px;border-radius:6px;background:' + sq2.bgColor + ';border:1px solid ' + sq2.borderColor + ';line-height:1.6">';
         html += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Single @ ' + r.single.bestTime + '</div>';
         html += '<span style="font-size:20px;font-weight:700;color:' + sq2.htmlColor + '">' + sq2.label + ' ' + scsData.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
         html += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
         html += 'Return ' + scsData.returnScore + ' \\u00B7 DD ' + scsData.ddScore + ' \\u00B7 Neighbors ' + scsData.neighborScore;
-        if (scsData.wfScore !== null) html += ' \\u00B7 WF ' + scsData.wfScore;
+        if (scsData.robustnessScore !== null) html += ' \\u00B7 RC ' + scsData.robustnessScore;
+        if (scsData.wfScore !== null) html += ' \\u00B7 OOS ' + scsData.wfScore;
+        html += '</div></div>';
+      }
+      if (ccsData) {
+        var cq2 = getQL2(ccsData.total);
+        html += '<div style="flex:1;min-width:180px;padding:10px 12px;border-radius:6px;background:' + cq2.bgColor + ';border:1px solid ' + cq2.borderColor + ';line-height:1.6">';
+        html += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Cash @ ' + r.cash.bestTime + '</div>';
+        html += '<span style="font-size:20px;font-weight:700;color:' + cq2.htmlColor + '">' + cq2.label + ' ' + ccsData.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
+        html += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
+        html += 'Return ' + ccsData.returnScore + ' \\u00B7 DD ' + ccsData.ddScore + ' \\u00B7 Neighbors ' + ccsData.neighborScore;
+        if (ccsData.robustnessScore !== null) html += ' \\u00B7 RC ' + ccsData.robustnessScore;
+        if (ccsData.wfScore !== null) html += ' \\u00B7 OOS ' + ccsData.wfScore;
         html += '</div></div>';
       }
       html += '</div>';
@@ -2097,7 +2617,7 @@ function renderCombinedDetailCard(r) {
     var recClass = bs2 >= 55 ? 'add' : 'keep';
     var recText;
     if (bs2 >= 55) {
-      recText = 'USE ' + bm2.toUpperCase() + ' @ ' + (bm2 === 'Dual' ? r.dual.bestTime : r.single.bestTime) + ' (' + fmtPct(bi2, 1) + ', +' + br2.toFixed(0) + '% relative)';
+      recText = 'USE ' + bm2.toUpperCase() + ' @ ' + bt2 + ' (' + fmtPct(bi2, 1) + ', +' + br2.toFixed(0) + '% relative)';
     } else {
       recText = bm2 + ' mode marginal (' + fmtPct(bi2, 1) + ', +' + br2.toFixed(0) + '% relative) \\u2014 proceed with caution';
     }
@@ -2106,27 +2626,44 @@ function renderCombinedDetailCard(r) {
 
   // Summary: best of each mode
   html += '<table class="detail-table"><thead><tr>';
-  html += '<th>Mode</th><th>Best Time</th><th>Return</th><th>vs EOD</th><th>% of EOD</th><th>Max DD</th><th>DD vs EOD</th>';
+  html += '<th>Mode</th><th>Best Time</th><th>Ann Return</th><th>vs EOD</th><th>% of EOD</th><th>Max DD</th><th>DD vs EOD</th>';
   html += '</tr></thead><tbody>';
 
-  var eodRet = r.eod.cumReturn;
+  var eodAnnGui3 = r.eod.annReturn != null ? r.eod.annReturn : annualizeGui2(r.eod.cumReturn, r.tradingDays);
+  var dualAnnBest2 = r.dual.bestAnnReturn != null ? r.dual.bestAnnReturn : annualizeGui2(r.dual.bestReturn, r.tradingDays);
+  var singleAnnBest2 = r.single.bestAnnReturn != null ? r.single.bestAnnReturn : annualizeGui2(r.single.bestReturn, r.tradingDays);
+  var dualAnnDiff = dualAnnBest2 != null && eodAnnGui3 != null ? dualAnnBest2 - eodAnnGui3 : 0;
+  var singleAnnDiff = singleAnnBest2 != null && eodAnnGui3 != null ? singleAnnBest2 - eodAnnGui3 : 0;
   var dualDDChg = r.dual.bestDD - r.eod.maxDD;
-  var dualRelImp = eodRet !== 0 ? (r.dual.improvement / Math.abs(eodRet)) * 100 : 0;
+  var dualRelImp = eodAnnGui3 != null && eodAnnGui3 !== 0 ? (dualAnnDiff / Math.abs(eodAnnGui3)) * 100 : 0;
   html += '<tr><td>Dual (Intraday + EOD)</td><td>' + r.dual.bestTime + '</td>';
-  html += '<td>' + fmtPct(r.dual.bestReturn, 1) + '</td>';
-  html += '<td class="' + valClass(r.dual.improvement) + '">' + fmtPct(r.dual.improvement, 1) + '</td>';
+  html += '<td>' + fmtPct(dualAnnBest2, 1) + '</td>';
+  html += '<td class="' + valClass(dualAnnDiff) + '">' + fmtPct(dualAnnDiff, 1) + '</td>';
   html += '<td class="' + valClass(dualRelImp) + '">' + fmtPct(dualRelImp, 0) + '</td>';
   html += '<td>' + r.dual.bestDD.toFixed(1) + '%</td>';
   html += '<td class="' + valClass(dualDDChg, true) + '">' + fmtNum(dualDDChg, 1) + '</td></tr>';
 
   var singleDDChg = r.single.bestDD - r.eod.maxDD;
-  var singleRelImp = eodRet !== 0 ? (r.single.improvement / Math.abs(eodRet)) * 100 : 0;
+  var singleRelImp = eodAnnGui3 != null && eodAnnGui3 !== 0 ? (singleAnnDiff / Math.abs(eodAnnGui3)) * 100 : 0;
   html += '<tr><td>Single (Replace EOD)</td><td>' + r.single.bestTime + '</td>';
-  html += '<td>' + fmtPct(r.single.bestReturn, 1) + '</td>';
-  html += '<td class="' + valClass(r.single.improvement) + '">' + fmtPct(r.single.improvement, 1) + '</td>';
+  html += '<td>' + fmtPct(singleAnnBest2, 1) + '</td>';
+  html += '<td class="' + valClass(singleAnnDiff) + '">' + fmtPct(singleAnnDiff, 1) + '</td>';
   html += '<td class="' + valClass(singleRelImp) + '">' + fmtPct(singleRelImp, 0) + '</td>';
   html += '<td>' + r.single.bestDD.toFixed(1) + '%</td>';
   html += '<td class="' + valClass(singleDDChg, true) + '">' + fmtNum(singleDDChg, 1) + '</td></tr>';
+
+  if (r.cash) {
+    var cashAnnBest2 = r.cash.bestAnnReturn != null ? r.cash.bestAnnReturn : annualizeGui2(r.cash.bestReturn, r.tradingDays);
+    var cashAnnDiff = cashAnnBest2 != null && eodAnnGui3 != null ? cashAnnBest2 - eodAnnGui3 : 0;
+    var cashDDChg = r.cash.bestDD - r.eod.maxDD;
+    var cashRelImp = eodAnnGui3 != null && eodAnnGui3 !== 0 ? (cashAnnDiff / Math.abs(eodAnnGui3)) * 100 : 0;
+    html += '<tr><td>Cash (Go to Cash Midday)</td><td>' + r.cash.bestTime + '</td>';
+    html += '<td>' + fmtPct(cashAnnBest2, 1) + '</td>';
+    html += '<td class="' + valClass(cashAnnDiff) + '">' + fmtPct(cashAnnDiff, 1) + '</td>';
+    html += '<td class="' + valClass(cashRelImp) + '">' + fmtPct(cashRelImp, 0) + '</td>';
+    html += '<td>' + r.cash.bestDD.toFixed(1) + '%</td>';
+    html += '<td class="' + valClass(cashDDChg, true) + '">' + fmtNum(cashDDChg, 1) + '</td></tr>';
+  }
 
   html += '</tbody></table>';
 
@@ -2134,7 +2671,7 @@ function renderCombinedDetailCard(r) {
   if (r.dual.times && Object.keys(r.dual.times).length > 0) {
     html += '<div style="margin-top:12px;font-size:12px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Dual - All Times (Intraday + EOD)</div>';
     html += '<table class="detail-table"><thead><tr>';
-    html += '<th>Time</th><th>Cum Return</th><th>vs EOD</th><th>% of EOD</th><th>Max Drawdown</th><th>DD vs EOD</th>';
+    html += '<th>Time</th><th>Ann Return</th><th>Cum Return</th><th>vs EOD</th><th>% of EOD</th><th>Max Drawdown</th><th>DD vs EOD</th>';
     html += '</tr></thead><tbody>';
     for (var di = 0; di < testTimes.length; di++) {
       var dt = testTimes[di];
@@ -2142,11 +2679,14 @@ function renderCombinedDetailCard(r) {
       var dv = r.dual.times[dt];
       var dIsBest = dt === r.dual.bestTime;
       var dDDChg2 = dv.maxDD - r.eod.maxDD;
-      var dRelImp = eodRet !== 0 ? (dv.improvement / Math.abs(eodRet)) * 100 : 0;
+      var dvAnnGui = dv.annReturn != null ? dv.annReturn : annualizeGui2(dv.cumReturn, r.tradingDays);
+      var dvAnnDiff = dvAnnGui != null && eodAnnGui3 != null ? dvAnnGui - eodAnnGui3 : 0;
+      var dRelImp = eodAnnGui3 != null && eodAnnGui3 !== 0 ? (dvAnnDiff / Math.abs(eodAnnGui3)) * 100 : 0;
       html += '<tr class="' + (dIsBest ? 'best' : '') + '">';
       html += '<td>' + dt + (dIsBest ? ' (BEST)' : '') + '</td>';
+      html += '<td>' + fmtPct(dvAnnGui, 1) + '</td>';
       html += '<td>' + fmtPct(dv.cumReturn, 1) + '</td>';
-      html += '<td class="' + valClass(dv.improvement) + '">' + fmtPct(dv.improvement, 1) + '</td>';
+      html += '<td class="' + valClass(dvAnnDiff) + '">' + fmtPct(dvAnnDiff, 1) + '</td>';
       html += '<td class="' + valClass(dRelImp) + '">' + fmtPct(dRelImp, 0) + '</td>';
       html += '<td>' + dv.maxDD.toFixed(1) + '%</td>';
       html += '<td class="' + valClass(dDDChg2, true) + '">' + fmtNum(dDDChg2, 1) + '</td>';
@@ -2159,7 +2699,7 @@ function renderCombinedDetailCard(r) {
   if (r.single.times && Object.keys(r.single.times).length > 0) {
     html += '<div style="margin-top:12px;font-size:12px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Single - All Times (Replace EOD)</div>';
     html += '<table class="detail-table"><thead><tr>';
-    html += '<th>Time</th><th>Cum Return</th><th>vs EOD</th><th>% of EOD</th><th>Max Drawdown</th><th>DD vs EOD</th>';
+    html += '<th>Time</th><th>Ann Return</th><th>Cum Return</th><th>vs EOD</th><th>% of EOD</th><th>Max Drawdown</th><th>DD vs EOD</th>';
     html += '</tr></thead><tbody>';
     for (var si = 0; si < testTimes.length; si++) {
       var st = testTimes[si];
@@ -2167,11 +2707,14 @@ function renderCombinedDetailCard(r) {
       var sv = r.single.times[st];
       var sIsBest = st === r.single.bestTime;
       var sDDChg2 = sv.maxDD - r.eod.maxDD;
-      var sRelImp = eodRet !== 0 ? (sv.improvement / Math.abs(eodRet)) * 100 : 0;
+      var svAnnGui = sv.annReturn != null ? sv.annReturn : annualizeGui2(sv.cumReturn, r.tradingDays);
+      var svAnnDiff = svAnnGui != null && eodAnnGui3 != null ? svAnnGui - eodAnnGui3 : 0;
+      var sRelImp = eodAnnGui3 != null && eodAnnGui3 !== 0 ? (svAnnDiff / Math.abs(eodAnnGui3)) * 100 : 0;
       html += '<tr class="' + (sIsBest ? 'best' : '') + '">';
       html += '<td>' + st + (sIsBest ? ' (BEST)' : '') + '</td>';
+      html += '<td>' + fmtPct(svAnnGui, 1) + '</td>';
       html += '<td>' + fmtPct(sv.cumReturn, 1) + '</td>';
-      html += '<td class="' + valClass(sv.improvement) + '">' + fmtPct(sv.improvement, 1) + '</td>';
+      html += '<td class="' + valClass(svAnnDiff) + '">' + fmtPct(svAnnDiff, 1) + '</td>';
       html += '<td class="' + valClass(sRelImp) + '">' + fmtPct(sRelImp, 0) + '</td>';
       html += '<td>' + sv.maxDD.toFixed(1) + '%</td>';
       html += '<td class="' + valClass(sDDChg2, true) + '">' + fmtNum(sDDChg2, 1) + '</td>';
@@ -2180,13 +2723,38 @@ function renderCombinedDetailCard(r) {
     html += '</tbody></table>';
   }
 
-  // Walk-forward sections
-  if (r.dual && r.dual.walkforward) {
-    html += renderWalkforwardHTML(r.dual.walkforward, 'Dual', 'DUAL', r.dual.allWalkforwardResults, r.dual.bestTime, r.dual.compositeScores);
+  // Cash time breakdown
+  if (r.cash && r.cash.times && Object.keys(r.cash.times).length > 0) {
+    html += '<div style="margin-top:12px;font-size:12px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Cash - All Times (Go to Cash Midday, Re-enter EOD)</div>';
+    html += '<table class="detail-table"><thead><tr>';
+    html += '<th>Time</th><th>Ann Return</th><th>Cum Return</th><th>vs EOD</th><th>% of EOD</th><th>Max Drawdown</th><th>DD vs EOD</th>';
+    html += '</tr></thead><tbody>';
+    for (var ci = 0; ci < testTimes.length; ci++) {
+      var ct = testTimes[ci];
+      if (!r.cash.times[ct]) continue;
+      var cv = r.cash.times[ct];
+      var cIsBest = ct === r.cash.bestTime;
+      var cDDChg2 = cv.maxDD - r.eod.maxDD;
+      var cvAnnGui = cv.annReturn != null ? cv.annReturn : annualizeGui2(cv.cumReturn, r.tradingDays);
+      var cvAnnDiff = cvAnnGui != null && eodAnnGui3 != null ? cvAnnGui - eodAnnGui3 : 0;
+      var cRelImpD = eodAnnGui3 != null && eodAnnGui3 !== 0 ? (cvAnnDiff / Math.abs(eodAnnGui3)) * 100 : 0;
+      html += '<tr class="' + (cIsBest ? 'best' : '') + '">';
+      html += '<td>' + ct + (cIsBest ? ' (BEST)' : '') + '</td>';
+      html += '<td>' + fmtPct(cvAnnGui, 1) + '</td>';
+      html += '<td>' + fmtPct(cv.cumReturn, 1) + '</td>';
+      html += '<td class="' + valClass(cvAnnDiff) + '">' + fmtPct(cvAnnDiff, 1) + '</td>';
+      html += '<td class="' + valClass(cRelImpD) + '">' + fmtPct(cRelImpD, 0) + '</td>';
+      html += '<td>' + cv.maxDD.toFixed(1) + '%</td>';
+      html += '<td class="' + valClass(cDDChg2, true) + '">' + fmtNum(cDDChg2, 1) + '</td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
   }
-  if (r.single && r.single.walkforward) {
-    html += renderWalkforwardHTML(r.single.walkforward, 'Single @' + r.single.bestTime, 'SINGLE', r.single.allWalkforwardResults, r.single.bestTime, r.single.compositeScores);
-  }
+
+  // Walk-forward sections (unified tabs)
+  if (r.dual) html += renderUnifiedWfHTML(r.dual.allWalkforwardResults, r.dual.oosWalkforward, r.dual.compositeScores, r.dual.bestTime);
+  if (r.single) html += renderUnifiedWfHTML(r.single.allWalkforwardResults, r.single.oosWalkforward, r.single.compositeScores, r.single.bestTime);
+  if (r.cash) html += renderUnifiedWfHTML(r.cash.allWalkforwardResults, r.cash.oosWalkforward, r.cash.compositeScores, r.cash.bestTime);
 
   html += '</div></div>';
   return html;
@@ -2260,6 +2828,18 @@ function onTimeframeChange() {
   buildTimesGrid();
 }
 
+function onBaselineChange() {
+  var val = document.getElementById('settingBaseline').value;
+  var eodRow = document.getElementById('eodTimeRow');
+  if (val === 'composer') {
+    eodRow.style.opacity = '0.4';
+    eodRow.style.pointerEvents = 'none';
+  } else {
+    eodRow.style.opacity = '1';
+    eodRow.style.pointerEvents = 'auto';
+  }
+}
+
 function buildEodOptions() {
   var timeframe = document.getElementById('settingTimeframe').value || config.alpacaTimeframe || '15Min';
   var eodSelect = document.getElementById('settingEod');
@@ -2291,16 +2871,18 @@ function buildEodOptions() {
 async function saveGeneralSettings() {
   var timeframe = document.getElementById('settingTimeframe').value;
   var eodTime = document.getElementById('settingEod').value;
+  var baselineSource = document.getElementById('settingBaseline').value;
 
   try {
     var resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ alpacaTimeframe: timeframe, eodTime: eodTime }),
+      body: JSON.stringify({ alpacaTimeframe: timeframe, eodTime: eodTime, baselineSource: baselineSource }),
     });
     var data = await resp.json();
     config.alpacaTimeframe = data.alpacaTimeframe;
     config.eodTime = data.eodTime;
+    config.baselineSource = data.baselineSource || 'simulated';
     if (data.testTimes) config.testTimes = data.testTimes;
     updateConfigUI();
     closeSettings();
