@@ -427,7 +427,8 @@ function buildReportHTML(r, mode) {
 
   // EOD baseline
   body += '<div class="section">';
-  var blLabel = r.baselineSource === 'composer' ? 'Baseline (Composer Backtest)' : 'Baseline (EOD ' + esc(eodTime) + ')';
+  var eodSource = eodTime === '16:00' ? 'Yahoo daily close' : 'Alpaca ' + esc(eodTime) + ' bar';
+  var blLabel = r.baselineSource === 'composer' ? 'Baseline (Composer Backtest / Xignite)' : 'Baseline (' + eodSource + ')';
   body += '<div class="section-title">' + blLabel + '</div>';
   var cumFmt = ' (' + pct(r.eod.cumReturn, 1) + ' cum.)';
   var annVal = r.eod.annReturn != null ? r.eod.annReturn : ann(r.eod.cumReturn);
@@ -2852,10 +2853,16 @@ function buildEodOptions() {
     : ['15:45', '16:00'];
 
   eodSelect.innerHTML = '';
+  var eodLabels = {
+    '15:45': '15:45 — Alpaca bar (Composer starts executing)',
+    '15:50': '15:50 — Alpaca bar (mid-execution window)',
+    '15:55': '15:55 — Alpaca bar (near end of window)',
+    '16:00': '16:00 — Yahoo daily close (official market close)'
+  };
   options.forEach(function(t) {
     var opt = document.createElement('option');
     opt.value = t;
-    opt.textContent = t === '16:00' ? '16:00 (Market Close)' : t;
+    opt.textContent = eodLabels[t] || t;
     eodSelect.appendChild(opt);
   });
 

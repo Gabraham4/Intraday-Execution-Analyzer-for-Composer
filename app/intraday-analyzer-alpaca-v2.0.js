@@ -1531,9 +1531,13 @@ function getIntradayPrice(ticker, intradayData, date, time, dailyData = null) {
   }
 
   const dd = intradayData[ticker]?.byDT?.[date];
-  if (!dd) {
-    // Only fall back to daily close for EOD times (>= 15:45) to avoid lookahead bias
-    if (dailyData && time >= '15:45') {
+  if (!dd || Object.keys(dd).length === 0) {
+    // No intraday data at all for this date — fall back to daily close for ANY time.
+    // This prevents the return chain from breaking on days where Alpaca has gaps
+    // (e.g., 2025-03-10, 2026-03-03) or market holidays not in Alpaca's calendar.
+    // For 3x leveraged ETFs, skipping even one day can distort cumulative returns
+    // by 10-15% due to missed large moves.
+    if (dailyData) {
       const dailyClose = dailyData[ticker]?.byDate?.[date]?.close;
       if (dailyClose) return dailyClose;
     }
@@ -1551,14 +1555,22 @@ function getIntradayPrice(ticker, intradayData, date, time, dailyData = null) {
     else break;  // times are sorted, no need to check further
   }
 
-  // EOD fallback: if the exact bar is missing at EOD times (>= 15:45),
-  // use the daily close instead of a stale intraday bar.
-  // Illiquid ETFs (EDC, GLL, TMV, etc.) often have missing 5-min bars near close
-  // because Alpaca only creates bars when actual trading occurs. Rather than using
-  // a potentially hours-old price, the daily close is far more accurate for EOD.
-  if (time >= '15:45' && bestTime !== time && dailyData) {
-    const dailyClose = dailyData[ticker]?.byDate?.[date]?.close;
-    if (dailyClose) return dailyClose;
+  // Staleness fallback: if the nearest bar is far from the requested time,
+  // use the daily close instead. This handles:
+  //   - EOD times on days with missing late bars (illiquid ETFs)
+  //   - Early-close days (Christmas Eve, etc.) where bars stop at 10:15 or 13:00
+  //     but we need a price at 14:00+ — the daily close is far more accurate
+  //     than a hours-old intraday bar.
+  // For EOD times (>= 15:45), always fall back if bar doesn't match exactly.
+  // For earlier times, fall back if the gap exceeds 2 hours (early-close scenario).
+  if (bestTime !== time && dailyData) {
+    const [bH, bM] = (bestTime || '00:00').split(':').map(Number);
+    const [tH, tM] = time.split(':').map(Number);
+    const gapMinutes = (tH * 60 + tM) - (bH * 60 + bM);
+    if (time >= '15:45' || gapMinutes > 120) {
+      const dailyClose = dailyData[ticker]?.byDate?.[date]?.close;
+      if (dailyClose) return dailyClose;
+    }
   }
 
   // Adjust for reverse/forward splits: intraday cache may have unadjusted prices
@@ -7366,10 +7378,10 @@ ${'─'.repeat(70)}
           console.log('  Options:');
           eodOptions.forEach((t, i) => {
             const current = t === CONFIG.EOD_TIME ? ' ◀ CURRENT' : '';
-            const desc = t === '15:45' ? '(Composer starts executing)' :
-                        t === '15:50' ? '(Mid-execution window)' :
-                        t === '15:55' ? '(Near end of window)' :
-                        t === '16:00' ? '(Official market close)' : '';
+            const desc = t === '15:45' ? '(Alpaca 15:45 bar — Composer starts executing)' :
+                        t === '15:50' ? '(Alpaca 15:50 bar — mid-execution window)' :
+                        t === '15:55' ? '(Alpaca 15:55 bar — near end of window)' :
+                        t === '16:00' ? '(Yahoo daily close — official market close)' : '';
             console.log(`    ${i + 1}. ${t} ${desc}${current}`);
           });
           console.log('');
