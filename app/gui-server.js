@@ -64,6 +64,9 @@ function saveGUISettings(updates) {
     const tp = parseFloat(saved.takeProfitThreshold);
     analyzer.CONFIG.takeProfitThreshold = tp !== 0 ? tp : null;
   }
+  if (saved.minReliability !== undefined) {
+    analyzer.CONFIG.minReliability = parseInt(saved.minReliability) || 0;
+  }
 })();
 
 // ============================================================================
@@ -832,6 +835,7 @@ async function handleRequest(req, res) {
         baselineSource: analyzer.CONFIG.composerBaseline ? 'composer' : 'simulated',
         executionThreshold: analyzer.CONFIG.executionThreshold ? String(analyzer.CONFIG.executionThreshold) : '0',
         takeProfitThreshold: analyzer.CONFIG.takeProfitThreshold ? String(analyzer.CONFIG.takeProfitThreshold) : '0',
+        minReliability: String(analyzer.CONFIG.minReliability || 25),
         testTimes: analyzer.CONFIG.TEST_TIMES,
         maxIntradayDays: analyzer.CONFIG.MAX_INTRADAY_DAYS,
         dataSource: analyzer.CONFIG.dataSource,
@@ -1094,6 +1098,12 @@ async function handleRequest(req, res) {
         guiUpdates.takeProfitThreshold = body.takeProfitThreshold;
       }
 
+      // Min reliability setting
+      if (body.minReliability !== undefined) {
+        analyzer.CONFIG.minReliability = parseInt(body.minReliability) || 0;
+        guiUpdates.minReliability = body.minReliability;
+      }
+
       // Persist to gui-settings.json
       if (Object.keys(guiUpdates).length > 0) {
         saveGUISettings(guiUpdates);
@@ -1107,6 +1117,7 @@ async function handleRequest(req, res) {
         baselineSource: analyzer.CONFIG.composerBaseline ? 'composer' : 'simulated',
         executionThreshold: analyzer.CONFIG.executionThreshold ? String(analyzer.CONFIG.executionThreshold) : '0',
         takeProfitThreshold: analyzer.CONFIG.takeProfitThreshold ? String(analyzer.CONFIG.takeProfitThreshold) : '0',
+        minReliability: String(analyzer.CONFIG.minReliability || 25),
       });
       return;
     }
@@ -1598,6 +1609,16 @@ const FRONTEND_HTML = `<!DOCTYPE html>
         </select>
         <div class="hint">Only execute intraday "Run Now" when the portfolio is up by at least this much since yesterday's close. Filters out flat/red days to focus intraday trades on profitable momentum.</div>
       </div>
+      <div class="modal-row">
+        <label>Min Reliability to Run</label>
+        <select id="settingMinReliability">
+          <option value="0">Off (always run, just show badge)</option>
+          <option value="25">25+ (skip UNRELIABLE only)</option>
+          <option value="50">50+ (skip LOW and UNRELIABLE)</option>
+          <option value="80">80+ (only run HIGH reliability)</option>
+        </select>
+        <div class="hint">Minimum holdings reliability score vs Composer to proceed with backtests. Strategies below this threshold are skipped — saves time on strategies where our data can't replicate Composer's holdings. Requires Composer API keys.</div>
+      </div>
       <div class="modal-actions">
         <button class="cancel" onclick="closeSettings()">Cancel</button>
         <button class="save" onclick="saveGeneralSettings()">Save</button>
@@ -1716,6 +1737,7 @@ function updateConfigUI() {
   document.getElementById('settingBaseline').value = config.baselineSource || 'simulated';
   document.getElementById('settingExecThreshold').value = config.executionThreshold || '0';
   document.getElementById('settingTakeProfit').value = config.takeProfitThreshold || '0';
+  document.getElementById('settingMinReliability').value = config.minReliability || '25';
   onBaselineChange();
 
   // API Keys tab hints
@@ -2911,12 +2933,13 @@ async function saveGeneralSettings() {
   var baselineSource = document.getElementById('settingBaseline').value;
   var execThreshold = document.getElementById('settingExecThreshold').value;
   var takeProfit = document.getElementById('settingTakeProfit').value;
+  var minReliability = document.getElementById('settingMinReliability').value;
 
   try {
     var resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ alpacaTimeframe: timeframe, eodTime: eodTime, baselineSource: baselineSource, executionThreshold: execThreshold, takeProfitThreshold: takeProfit }),
+      body: JSON.stringify({ alpacaTimeframe: timeframe, eodTime: eodTime, baselineSource: baselineSource, executionThreshold: execThreshold, takeProfitThreshold: takeProfit, minReliability: minReliability }),
     });
     var data = await resp.json();
     config.alpacaTimeframe = data.alpacaTimeframe;

@@ -64,6 +64,7 @@ const CONFIG = {
   composerBaseline: false,        // Use Composer's actual backtest holdings as EOD baseline
   executionThreshold: null,       // Min allocation change to trigger intraday execution (e.g., 0.05 = 5%). Matches n8n's 5% skip rule. null = always execute.
   takeProfitThreshold: null,      // Min portfolio gain since prev EOD to trigger intraday execution (e.g., 0.01 = 1%). Only execute Run Now on "green" days. null = disabled.
+  minReliability: 25,             // Min holdings reliability score (0-100) to proceed with backtests. Below this = skip strategy. 0 = always run.
   dateStart: null,                // Custom backtest start date (YYYY-MM-DD) or null for all
   dateEnd: null,                  // Custom backtest end date (YYYY-MM-DD) or null for all
 };
@@ -5210,6 +5211,18 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
           if (hr.alpaca) console.log(`    Alpaca vs Composer: ${hr.alpaca.score}/100 ${hr.alpaca.verdict} (${(hr.alpaca.avgTickerOverlap*100).toFixed(0)}% overlap, ${(hr.alpaca.exactMatchRate*100).toFixed(0)}% exact)`);
           if (hr.bestSource) console.log(`    Best source: ${hr.bestSource}`);
         }
+      }
+
+      // Gate: skip backtests if holdings reliability is below minimum threshold
+      if (holdingsReliability && CONFIG.minReliability > 0 && holdingsReliability.score < CONFIG.minReliability) {
+        if (!quiet) console.log(`  \x1b[31mSKIPPED — Holdings reliability ${holdingsReliability.score}/100 is below minimum ${CONFIG.minReliability}. Intraday analysis would be unreliable.\x1b[0m`);
+        results.push({
+          id, name, tradingDays: tradingDays.length, dateRange: `${tradingDays[0]} to ${tradingDays[tradingDays.length-1]}`,
+          holdingsReliability,
+          error: `Holdings reliability too low (${holdingsReliability.score}/100 < ${CONFIG.minReliability} minimum). Strategy skipped.`,
+          skippedReason: 'reliability'
+        });
+        continue;
       }
 
       if (CONFIG.composerBaseline && composerHoldingsData) {
