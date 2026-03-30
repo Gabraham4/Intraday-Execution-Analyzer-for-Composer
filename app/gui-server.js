@@ -564,41 +564,27 @@ function buildReportHTML(r, mode) {
     if (!bestMode) {
       body += '<div class="rec-warn">NOT RECOMMENDED \u2014 Improvement too small relative to EOD returns</div>';
     } else {
+      // Build mode card function
+      function modeCard(modeId, label, timeStr, cs, isBest) {
+        if (!cs) return '';
+        var q = getQL(cs.total);
+        var selStyle = isBest ? 'outline:2px solid #58a6ff;outline-offset:-2px;' : 'opacity:0.7;';
+        return '<div class="mode-card" data-mode="' + modeId + '" onclick="switchModeTab(\'' + modeId + '\')" '
+          + 'style="flex:1;min-width:200px;padding:10px 12px;border-radius:6px;background:' + q.bgColor + ';border:1px solid ' + q.borderColor + ';line-height:1.6;cursor:pointer;transition:all 0.15s;' + selStyle + '">'
+          + '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">' + label + ' @ ' + timeStr + '</div>'
+          + '<span style="font-size:20px;font-weight:700;color:' + q.htmlColor + '">' + q.label + ' ' + cs.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>'
+          + '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">'
+          + 'Return ' + cs.returnScore + ' &middot; DD ' + cs.ddScore + ' &middot; Neighbors ' + cs.neighborScore
+          + (cs.robustnessScore !== null ? ' &middot; RC ' + cs.robustnessScore : '')
+          + (cs.wfScore !== null ? ' &middot; OOS ' + cs.wfScore : '')
+          + '</div></div>';
+      }
+
       if (dualCS || singleCS || cashCSc) {
         body += '<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">';
-        if (dualCS) {
-          var dq = getQL(dualCS.total);
-          body += '<div style="flex:1;min-width:200px;padding:10px 12px;border-radius:6px;background:' + dq.bgColor + ';border:1px solid ' + dq.borderColor + ';line-height:1.6">';
-          body += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Dual @ ' + r.dual.bestTime + '</div>';
-          body += '<span style="font-size:20px;font-weight:700;color:' + dq.htmlColor + '">' + dq.label + ' ' + dualCS.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
-          body += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
-          body += 'Return ' + dualCS.returnScore + ' &middot; DD ' + dualCS.ddScore + ' &middot; Neighbors ' + dualCS.neighborScore;
-          if (dualCS.robustnessScore !== null) body += ' &middot; RC ' + dualCS.robustnessScore;
-          if (dualCS.wfScore !== null) body += ' &middot; OOS ' + dualCS.wfScore;
-          body += '</div></div>';
-        }
-        if (singleCS) {
-          var sq = getQL(singleCS.total);
-          body += '<div style="flex:1;min-width:200px;padding:10px 12px;border-radius:6px;background:' + sq.bgColor + ';border:1px solid ' + sq.borderColor + ';line-height:1.6">';
-          body += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Single @ ' + r.single.bestTime + '</div>';
-          body += '<span style="font-size:20px;font-weight:700;color:' + sq.htmlColor + '">' + sq.label + ' ' + singleCS.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
-          body += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
-          body += 'Return ' + singleCS.returnScore + ' &middot; DD ' + singleCS.ddScore + ' &middot; Neighbors ' + singleCS.neighborScore;
-          if (singleCS.robustnessScore !== null) body += ' &middot; RC ' + singleCS.robustnessScore;
-          if (singleCS.wfScore !== null) body += ' &middot; OOS ' + singleCS.wfScore;
-          body += '</div></div>';
-        }
-        if (cashCSc) {
-          var cq = getQL(cashCSc.total);
-          body += '<div style="flex:1;min-width:200px;padding:10px 12px;border-radius:6px;background:' + cq.bgColor + ';border:1px solid ' + cq.borderColor + ';line-height:1.6">';
-          body += '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">Cash @ ' + r.cash.bestTime + '</div>';
-          body += '<span style="font-size:20px;font-weight:700;color:' + cq.htmlColor + '">' + cq.label + ' ' + cashCSc.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>';
-          body += '<div style="margin-top:4px;font-size:11px;color:var(--text2,#8b949e)">';
-          body += 'Return ' + cashCSc.returnScore + ' &middot; DD ' + cashCSc.ddScore + ' &middot; Neighbors ' + cashCSc.neighborScore;
-          if (cashCSc.robustnessScore !== null) body += ' &middot; RC ' + cashCSc.robustnessScore;
-          if (cashCSc.wfScore !== null) body += ' &middot; OOS ' + cashCSc.wfScore;
-          body += '</div></div>';
-        }
+        body += modeCard('dual', 'Dual', r.dual.bestTime, dualCS, bestMode === 'Dual');
+        body += modeCard('single', 'Single', r.single.bestTime, singleCS, bestMode === 'Single');
+        body += modeCard('cash', 'Cash', r.cash ? r.cash.bestTime : '', cashCSc, bestMode === 'Cash');
         body += '</div>';
       }
       var cRecClass = bestScore >= 55 ? 'rec-add' : 'rec-keep';
@@ -611,94 +597,51 @@ function buildReportHTML(r, mode) {
       body += '<div class="' + cRecClass + '">' + cRecText + '</div>';
     }
 
-    // Dual breakdown
-    if (r.dual.times && Object.keys(r.dual.times).length > 0) {
-      var dualKeys = testTimes.length > 0 ? testTimes : Object.keys(r.dual.times).sort();
-      body += '<div class="section">';
-      body += '<div class="section-title">Dual \u2014 All Times (Intraday + EOD)</div>';
-      body += '<table><thead><tr><th>Time</th><th>Ann Return</th><th>Cum Return</th><th>vs EOD</th><th>% of EOD</th><th>Max Drawdown</th><th>DD vs EOD</th></tr></thead><tbody>';
-      for (var di = 0; di < dualKeys.length; di++) {
-        var dt = dualKeys[di];
-        if (!r.dual.times[dt]) continue;
-        var dv = r.dual.times[dt];
-        var dBest = dt === r.dual.bestTime;
-        var dDDChg = dv.maxDD - r.eod.maxDD;
-        var dvAnn = dv.annReturn != null ? dv.annReturn : ann(dv.cumReturn);
-        var dvAnnDiff = dvAnn != null && eodAnnRpt != null ? dvAnn - eodAnnRpt : 0;
-        var dRelPct2 = eodAnnRpt != null && eodAnnRpt !== 0 ? (dvAnnDiff / Math.abs(eodAnnRpt)) * 100 : 0;
-        body += '<tr class="' + (dBest ? 'best' : '') + '">';
-        body += '<td>' + dt + (dBest ? ' <span class="badge">BEST</span>' : '') + '</td>';
-        body += '<td>' + pct(dvAnn, 1) + '</td>';
-        body += '<td>' + pct(dv.cumReturn, 1) + '</td>';
-        body += '<td class="' + cls(dvAnnDiff) + '">' + pct(dvAnnDiff, 1) + '</td>';
-        body += '<td class="' + cls(dRelPct2) + '">' + pct(dRelPct2, 0) + '</td>';
-        body += '<td>' + dv.maxDD.toFixed(2) + '%</td>';
-        body += '<td class="' + ddCls2(dDDChg) + '">' + pct(dDDChg, 2) + '</td></tr>';
+    // Helper to build a mode's time table
+    function buildTimeTable(modeData, modeTitle) {
+      if (!modeData || !modeData.times || Object.keys(modeData.times).length === 0) return '';
+      var keys = testTimes.length > 0 ? testTimes : Object.keys(modeData.times).sort();
+      var h = '<div class="section">';
+      h += '<div class="section-title">' + modeTitle + '</div>';
+      h += '<table><thead><tr><th>Time</th><th>Ann Return</th><th>Cum Return</th><th>vs EOD</th><th>% of EOD</th><th>Max Drawdown</th><th>DD vs EOD</th></tr></thead><tbody>';
+      for (var i = 0; i < keys.length; i++) {
+        var t = keys[i];
+        if (!modeData.times[t]) continue;
+        var v = modeData.times[t];
+        var isBest = t === modeData.bestTime;
+        var ddChg = v.maxDD - r.eod.maxDD;
+        var vAnn = v.annReturn != null ? v.annReturn : ann(v.cumReturn);
+        var vAnnDiff = vAnn != null && eodAnnRpt != null ? vAnn - eodAnnRpt : 0;
+        var relPct = eodAnnRpt != null && eodAnnRpt !== 0 ? (vAnnDiff / Math.abs(eodAnnRpt)) * 100 : 0;
+        h += '<tr class="' + (isBest ? 'best' : '') + '">';
+        h += '<td>' + t + (isBest ? ' <span class="badge">BEST</span>' : '') + '</td>';
+        h += '<td>' + pct(vAnn, 1) + '</td>';
+        h += '<td>' + pct(v.cumReturn, 1) + '</td>';
+        h += '<td class="' + cls(vAnnDiff) + '">' + pct(vAnnDiff, 1) + '</td>';
+        h += '<td class="' + cls(relPct) + '">' + pct(relPct, 0) + '</td>';
+        h += '<td>' + v.maxDD.toFixed(2) + '%</td>';
+        h += '<td class="' + ddCls2(ddChg) + '">' + pct(ddChg, 2) + '</td></tr>';
       }
-      body += '</tbody></table>';
-      body += '</div>';
+      h += '</tbody></table></div>';
+      return h;
     }
 
-    // Single breakdown
-    if (r.single.times && Object.keys(r.single.times).length > 0) {
-      var singleKeys = testTimes.length > 0 ? testTimes : Object.keys(r.single.times).sort();
-      body += '<div class="section">';
-      body += '<div class="section-title">Single \u2014 All Times (Replace EOD)</div>';
-      body += '<table><thead><tr><th>Time</th><th>Ann Return</th><th>Cum Return</th><th>vs EOD</th><th>% of EOD</th><th>Max Drawdown</th><th>DD vs EOD</th></tr></thead><tbody>';
-      for (var si = 0; si < singleKeys.length; si++) {
-        var st = singleKeys[si];
-        if (!r.single.times[st]) continue;
-        var sv = r.single.times[st];
-        var sBest = st === r.single.bestTime;
-        var sDDChg = sv.maxDD - r.eod.maxDD;
-        var svAnn = sv.annReturn != null ? sv.annReturn : ann(sv.cumReturn);
-        var svAnnDiff = svAnn != null && eodAnnRpt != null ? svAnn - eodAnnRpt : 0;
-        var sRelPct2 = eodAnnRpt != null && eodAnnRpt !== 0 ? (svAnnDiff / Math.abs(eodAnnRpt)) * 100 : 0;
-        body += '<tr class="' + (sBest ? 'best' : '') + '">';
-        body += '<td>' + st + (sBest ? ' <span class="badge">BEST</span>' : '') + '</td>';
-        body += '<td>' + pct(svAnn, 1) + '</td>';
-        body += '<td>' + pct(sv.cumReturn, 1) + '</td>';
-        body += '<td class="' + cls(svAnnDiff) + '">' + pct(svAnnDiff, 1) + '</td>';
-        body += '<td class="' + cls(sRelPct2) + '">' + pct(sRelPct2, 0) + '</td>';
-        body += '<td>' + sv.maxDD.toFixed(2) + '%</td>';
-        body += '<td class="' + ddCls2(sDDChg) + '">' + pct(sDDChg, 2) + '</td></tr>';
-      }
-      body += '</tbody></table>';
+    // Mode panels — each contains backtest table + walk-forward section
+    var defaultMode = bestMode ? bestMode.toLowerCase() : 'dual';
+    var modes = [
+      { id: 'dual', data: r.dual, title: 'Dual \u2014 All Times (Intraday + EOD)' },
+      { id: 'single', data: r.single, title: 'Single \u2014 All Times (Replace EOD)' },
+      { id: 'cash', data: r.cash, title: 'Cash \u2014 All Times (Go to Cash Midday, Re-enter EOD)' }
+    ];
+    for (var mi = 0; mi < modes.length; mi++) {
+      var md = modes[mi];
+      if (!md.data) continue;
+      var showPanel = md.id === defaultMode ? '' : 'display:none';
+      body += '<div class="mode-panel" data-mode="' + md.id + '" style="' + showPanel + '">';
+      body += buildTimeTable(md.data, md.title);
+      body += buildUnifiedWfSection(md.data.allWalkforwardResults, md.data.oosWalkforward, md.data.compositeScores, md.data.bestTime);
       body += '</div>';
     }
-
-    // Cash breakdown
-    if (r.cash && r.cash.times && Object.keys(r.cash.times).length > 0) {
-      var cashKeys = testTimes.length > 0 ? testTimes : Object.keys(r.cash.times).sort();
-      body += '<div class="section">';
-      body += '<div class="section-title">Cash \u2014 All Times (Go to Cash Midday, Re-enter EOD)</div>';
-      body += '<table><thead><tr><th>Time</th><th>Ann Return</th><th>Cum Return</th><th>vs EOD</th><th>% of EOD</th><th>Max Drawdown</th><th>DD vs EOD</th></tr></thead><tbody>';
-      for (var ci = 0; ci < cashKeys.length; ci++) {
-        var ct = cashKeys[ci];
-        if (!r.cash.times[ct]) continue;
-        var cv = r.cash.times[ct];
-        var cBest = ct === r.cash.bestTime;
-        var cDDChg = cv.maxDD - r.eod.maxDD;
-        var cvAnn = cv.annReturn != null ? cv.annReturn : ann(cv.cumReturn);
-        var cvAnnDiff = cvAnn != null && eodAnnRpt != null ? cvAnn - eodAnnRpt : 0;
-        var cRelPct2 = eodAnnRpt != null && eodAnnRpt !== 0 ? (cvAnnDiff / Math.abs(eodAnnRpt)) * 100 : 0;
-        body += '<tr class="' + (cBest ? 'best' : '') + '">';
-        body += '<td>' + ct + (cBest ? ' <span class="badge">BEST</span>' : '') + '</td>';
-        body += '<td>' + pct(cvAnn, 1) + '</td>';
-        body += '<td>' + pct(cv.cumReturn, 1) + '</td>';
-        body += '<td class="' + cls(cvAnnDiff) + '">' + pct(cvAnnDiff, 1) + '</td>';
-        body += '<td class="' + cls(cRelPct2) + '">' + pct(cRelPct2, 0) + '</td>';
-        body += '<td>' + cv.maxDD.toFixed(2) + '%</td>';
-        body += '<td class="' + ddCls2(cDDChg) + '">' + pct(cDDChg, 2) + '</td></tr>';
-      }
-      body += '</tbody></table>';
-      body += '</div>';
-    }
-
-    // Walk-forward for combined (unified tabs)
-    if (r.dual) body += buildUnifiedWfSection(r.dual.allWalkforwardResults, r.dual.oosWalkforward, r.dual.compositeScores, r.dual.bestTime);
-    if (r.single) body += buildUnifiedWfSection(r.single.allWalkforwardResults, r.single.oosWalkforward, r.single.compositeScores, r.single.bestTime);
-    if (r.cash) body += buildUnifiedWfSection(r.cash.allWalkforwardResults, r.cash.oosWalkforward, r.cash.compositeScores, r.cash.bestTime);
   }
 
   return '<!DOCTYPE html>\n<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
@@ -728,6 +671,20 @@ function buildReportHTML(r, mode) {
     + body
     + '\n<div class="footer">Intraday Execution Analyzer &nbsp;\u00B7&nbsp; Generated ' + esc(runDate) + '</div>\n'
     + '<script>\n'
+    + 'function switchModeTab(mode) {\n'
+    + '  var cards = document.querySelectorAll(".mode-card");\n'
+    + '  for (var i = 0; i < cards.length; i++) {\n'
+    + '    if (cards[i].getAttribute("data-mode") === mode) {\n'
+    + '      cards[i].style.opacity = "1"; cards[i].style.outline = "2px solid #58a6ff"; cards[i].style.outlineOffset = "-2px";\n'
+    + '    } else {\n'
+    + '      cards[i].style.opacity = "0.7"; cards[i].style.outline = "none";\n'
+    + '    }\n'
+    + '  }\n'
+    + '  var panels = document.querySelectorAll(".mode-panel");\n'
+    + '  for (var i = 0; i < panels.length; i++) {\n'
+    + '    panels[i].style.display = panels[i].getAttribute("data-mode") === mode ? "" : "none";\n'
+    + '  }\n'
+    + '}\n'
     + 'function switchWfTab(btn, uid, time) {\n'
     + '  var tabs = document.querySelectorAll(\'.wf-tab[data-uid="\' + uid + \'"]\');\n'
     + '  for (var i = 0; i < tabs.length; i++) {\n'
