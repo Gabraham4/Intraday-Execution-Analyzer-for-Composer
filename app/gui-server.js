@@ -56,6 +56,10 @@ function saveGUISettings(updates) {
   if (saved.baselineSource === 'composer') {
     analyzer.CONFIG.composerBaseline = true;
   }
+  if (saved.executionThreshold) {
+    const et = parseFloat(saved.executionThreshold);
+    analyzer.CONFIG.executionThreshold = et > 0 ? et : null;
+  }
 })();
 
 // ============================================================================
@@ -744,6 +748,7 @@ async function handleRequest(req, res) {
         alpacaTimeframe: analyzer.CONFIG.ALPACA_TIMEFRAME,
         eodTime: analyzer.CONFIG.EOD_TIME,
         baselineSource: analyzer.CONFIG.composerBaseline ? 'composer' : 'simulated',
+        executionThreshold: analyzer.CONFIG.executionThreshold ? String(analyzer.CONFIG.executionThreshold) : '0',
         testTimes: analyzer.CONFIG.TEST_TIMES,
         maxIntradayDays: analyzer.CONFIG.MAX_INTRADAY_DAYS,
         dataSource: analyzer.CONFIG.dataSource,
@@ -992,6 +997,13 @@ async function handleRequest(req, res) {
         guiUpdates.baselineSource = body.baselineSource;
       }
 
+      // Execution threshold setting
+      if (body.executionThreshold !== undefined) {
+        const et = parseFloat(body.executionThreshold);
+        analyzer.CONFIG.executionThreshold = et > 0 ? et : null;
+        guiUpdates.executionThreshold = body.executionThreshold;
+      }
+
       // Persist to gui-settings.json
       if (Object.keys(guiUpdates).length > 0) {
         saveGUISettings(guiUpdates);
@@ -1003,6 +1015,7 @@ async function handleRequest(req, res) {
         eodTime: analyzer.CONFIG.EOD_TIME,
         testTimes: analyzer.CONFIG.TEST_TIMES,
         baselineSource: analyzer.CONFIG.composerBaseline ? 'composer' : 'simulated',
+        executionThreshold: analyzer.CONFIG.executionThreshold ? String(analyzer.CONFIG.executionThreshold) : '0',
       });
       return;
     }
@@ -1471,6 +1484,16 @@ const FRONTEND_HTML = `<!DOCTYPE html>
         <select id="settingEod"></select>
         <div class="hint">Only applies to Custom Yahoo mode. Composer Backtest uses Composer's own trading window.</div>
       </div>
+      <div class="modal-row">
+        <label>Execution Threshold</label>
+        <select id="settingExecThreshold">
+          <option value="0">None (always execute)</option>
+          <option value="0.03">3% min allocation change</option>
+          <option value="0.05">5% min allocation change (matches n8n)</option>
+          <option value="0.10">10% min allocation change</option>
+        </select>
+        <div class="hint">Minimum allocation change to trigger intraday "Run Now". Matches the n8n workflow's skip rule. Below this threshold, the morning execution is skipped and holdings drift to EOD.</div>
+      </div>
       <div class="modal-actions">
         <button class="cancel" onclick="closeSettings()">Cancel</button>
         <button class="save" onclick="saveGeneralSettings()">Save</button>
@@ -1587,6 +1610,7 @@ function updateConfigUI() {
   document.getElementById('settingTimeframe').value = config.alpacaTimeframe || '15Min';
   buildEodOptions();
   document.getElementById('settingBaseline').value = config.baselineSource || 'simulated';
+  document.getElementById('settingExecThreshold').value = config.executionThreshold || '0';
   onBaselineChange();
 
   // API Keys tab hints
@@ -2760,17 +2784,19 @@ async function saveGeneralSettings() {
   var timeframe = document.getElementById('settingTimeframe').value;
   var eodTime = document.getElementById('settingEod').value;
   var baselineSource = document.getElementById('settingBaseline').value;
+  var execThreshold = document.getElementById('settingExecThreshold').value;
 
   try {
     var resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ alpacaTimeframe: timeframe, eodTime: eodTime, baselineSource: baselineSource }),
+      body: JSON.stringify({ alpacaTimeframe: timeframe, eodTime: eodTime, baselineSource: baselineSource, executionThreshold: execThreshold }),
     });
     var data = await resp.json();
     config.alpacaTimeframe = data.alpacaTimeframe;
     config.eodTime = data.eodTime;
     config.baselineSource = data.baselineSource || 'simulated';
+    config.executionThreshold = data.executionThreshold || '0';
     if (data.testTimes) config.testTimes = data.testTimes;
     updateConfigUI();
     closeSettings();

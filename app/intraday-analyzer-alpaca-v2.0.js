@@ -62,6 +62,7 @@ const CONFIG = {
   oosStepSize: 21,                // OOS test window size (~1 month)
   wfMaxCandidates: 10,            // Max candidate times for WF testing (both tiers)
   composerBaseline: false,        // Use Composer's actual backtest holdings as EOD baseline
+  executionThreshold: null,       // Min allocation change to trigger intraday execution (e.g., 0.05 = 5%). Matches n8n's 5% skip rule. null = always execute.
   dateStart: null,                // Custom backtest start date (YYYY-MM-DD) or null for all
   dateEnd: null,                  // Custom backtest end date (YYYY-MM-DD) or null for all
 };
@@ -3257,6 +3258,53 @@ function shouldRebalance(currentHoldings, targetHoldings, threshold, dailyData, 
 }
 
 /**
+ * Checks if a morning "Run Now" execution would pass the execution threshold.
+ * This mirrors the n8n workflow's 5% skip rule: if the max allocation change
+ * between current (drifted) holdings and the target selection is below the
+ * threshold, skip the intraday execution entirely (no Run Now).
+ * Returns true if the change is large enough to execute.
+ */
+function passesExecutionThreshold(currentHoldings, targetHoldings, dailyData, intradayData, prevDate, currDate, prevTime, currTime) {
+  const execThreshold = CONFIG.executionThreshold;
+  if (execThreshold === null || execThreshold === undefined) return true; // no threshold = always execute
+
+  if (currentHoldings.length === 0) return true; // no holdings = must execute
+
+  // Compute actual drifted weights after price movement
+  let totalValue = 0;
+  const holdingValues = [];
+  for (const h of currentHoldings) {
+    const prevPrice = getIntradayPrice(h.ticker, intradayData, prevDate, prevTime, dailyData);
+    const currPrice = getIntradayPrice(h.ticker, intradayData, currDate, currTime, dailyData);
+    const value = (prevPrice && currPrice && prevPrice > 0) ? h.weight * (currPrice / prevPrice) : h.weight;
+    holdingValues.push({ ticker: h.ticker, value });
+    totalValue += value;
+  }
+
+  const actualWeights = {};
+  for (const h of holdingValues) {
+    actualWeights[h.ticker] = (actualWeights[h.ticker] || 0) + (totalValue > 0 ? h.value / totalValue : 0);
+  }
+
+  const targetWeights = {};
+  for (const h of targetHoldings) {
+    targetWeights[h.ticker] = (targetWeights[h.ticker] || 0) + h.weight;
+  }
+
+  // Max allocation change across all tickers
+  const allTickers = new Set([...Object.keys(actualWeights), ...Object.keys(targetWeights)]);
+  let maxChange = 0;
+  for (const ticker of allTickers) {
+    const actual = actualWeights[ticker] || 0;
+    const target = targetWeights[ticker] || 0;
+    const change = Math.abs(actual - target);
+    if (change > maxChange) maxChange = change;
+  }
+
+  return maxChange >= execThreshold;
+}
+
+/**
  * Computes drifted weights after price movement (for non-rebalance days).
  * Returns new holdings array with updated weights reflecting actual portfolio proportions.
  */
@@ -3523,14 +3571,21 @@ function runDualTimeBacktest(score, dailyData, intradayData, tradingDays, mornin
       }
     }
 
-    // Morning rebalance (threshold-aware)
-    if (morningSelection.length > 0) {
+    // Morning rebalance (threshold-aware + execution threshold)
+    // Execution threshold mirrors n8n's 5% skip rule: if the allocation change
+    // is too small, don't execute the intraday "Run Now" — just drift holdings to EOD.
+    const morningExecPass = passesExecutionThreshold(holdings, morningSelection, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime);
+
+    if (morningExecPass && morningSelection.length > 0) {
       if (shouldRebalance(holdings, morningSelection, rebalanceThreshold, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime)) {
         holdings = morningSelection;
       } else if (prevDate && holdings.length > 0) {
         holdings = getDriftedWeights(holdings, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime);
       }
-    } else {
+    } else if (!morningExecPass && prevDate && holdings.length > 0) {
+      // Below execution threshold — skip Run Now, just drift to morning time
+      holdings = getDriftedWeights(holdings, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime);
+    } else if (morningSelection.length === 0) {
       holdings = []; // Cash signal: liquidate
     }
 
@@ -3811,15 +3866,19 @@ function runDualVsEodBacktestDaily(score, dailyData, intradayData, tradingDays, 
       if (totalWeight > 0) dualEquity *= (1 + overnightReturn);
     }
 
-    // Morning rebalance (threshold-aware)
-    if (morningSelection.length > 0) {
+    // Morning rebalance (threshold-aware + execution threshold)
+    const dualExecPass = passesExecutionThreshold(dualHoldings, morningSelection, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime);
+
+    if (dualExecPass && morningSelection.length > 0) {
       if (shouldRebalance(dualHoldings, morningSelection, rebalanceThreshold, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime)) {
         dualHoldings = morningSelection;
       } else if (prevDate && dualHoldings.length > 0) {
         dualHoldings = getDriftedWeights(dualHoldings, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime);
       }
-    } else {
-      dualHoldings = []; // Cash signal: liquidate
+    } else if (!dualExecPass && prevDate && dualHoldings.length > 0) {
+      dualHoldings = getDriftedWeights(dualHoldings, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime);
+    } else if (morningSelection.length === 0) {
+      dualHoldings = [];
     }
 
     // LEG 2: Intraday - morning holdings held until EOD
