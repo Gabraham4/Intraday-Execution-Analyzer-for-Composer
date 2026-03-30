@@ -116,7 +116,8 @@ function saveReport(result, mode) {
     if (!result || result.error || !result.name) return;
     if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
     // Include settings in filename so different configs don't overwrite each other
-    const eod = (analyzer.CONFIG && analyzer.CONFIG.EOD_TIME) || '15:45';
+    const isComposerBaseline = analyzer.CONFIG.composerBaseline;
+    const eod = isComposerBaseline ? 'composer' : ((analyzer.CONFIG && analyzer.CONFIG.EOD_TIME) || '15:45');
     const tf = (analyzer.CONFIG && analyzer.CONFIG.ALPACA_TIMEFRAME) || '15Min';
     const wf = (analyzer.CONFIG && analyzer.CONFIG.walkforward) ? 'wf' : 'nowf';
     const ds = analyzer.CONFIG.dateStart || '';
