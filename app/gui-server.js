@@ -5,7 +5,7 @@
  * Zero-dependency web server that wraps the CLI analyzer with a browser dashboard.
  * Uses only Node.js built-in http module.
  *
- * Usage: node gui-server.js [--port=3000]
+ * Usage: node gui-server.js [--port=3100]
  */
 
 const http = require('http');
@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const analyzer = require('./intraday-analyzer-alpaca-v2.0.js');
 
-const PORT = parseInt(process.argv.find(a => a.startsWith('--port='))?.split('=')[1] || process.env.PORT || '3000', 10);
+const PORT = parseInt(process.argv.find(a => a.startsWith('--port='))?.split('=')[1] || process.env.PORT || '3100', 10);
 
 // Track running analyses so we can prevent concurrent runs
 let analysisRunning = false;
@@ -487,6 +487,23 @@ function buildReportHTML(r, mode) {
 
   if (mode === 'dual' || mode === 'single' || mode === 'cash') {
     // Time-by-time table
+    // Holdings reliability badge
+    if (r.holdingsReliability) {
+      var hr = r.holdingsReliability;
+      var hrColor = hr.verdict === 'HIGH' ? '#3fb950' : hr.verdict === 'MODERATE' ? '#d29922' : '#f85149';
+      var hrBg = hr.verdict === 'HIGH' ? 'rgba(63,185,80,0.1)' : hr.verdict === 'MODERATE' ? 'rgba(210,153,34,0.1)' : 'rgba(248,81,73,0.1)';
+      body += '<div style="padding:10px 14px;border-radius:6px;background:' + hrBg + ';border:1px solid ' + hrColor + '30;margin-bottom:16px">';
+      body += '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#8b949e;margin-bottom:4px">Holdings Reliability vs Composer</div>';
+      body += '<span style="font-size:20px;font-weight:700;color:' + hrColor + '">' + hr.score + '/100 ' + hr.verdict + '</span>';
+      body += '<div style="margin-top:4px;font-size:12px;color:#8b949e">';
+      body += 'Ticker overlap: ' + (hr.avgTickerOverlap * 100).toFixed(0) + '% &middot; Weight overlap: ' + (hr.avgWeightOverlap * 100).toFixed(0) + '% &middot; Exact match: ' + (hr.exactMatchRate * 100).toFixed(0) + '% &middot; ' + hr.daysChecked + ' days checked';
+      body += '</div>';
+      if (hr.verdict === 'LOW' || hr.verdict === 'UNRELIABLE') {
+        body += '<div style="margin-top:6px;font-size:11px;color:' + hrColor + '">&#9888; Yahoo/Alpaca holdings diverge significantly from Composer. Intraday results may not be reliable for this strategy.</div>';
+      }
+      body += '</div>';
+    }
+
     var times = r.times || {};
     var timeKeys = testTimes.length > 0 ? testTimes : Object.keys(times).sort();
     body += '<div class="section">';
@@ -543,6 +560,23 @@ function buildReportHTML(r, mode) {
     }
 
   } else if (mode === 'combined') {
+
+    // Holdings reliability badge (combined mode)
+    var hrData = r.dual?.holdingsReliability || r.holdingsReliability;
+    if (hrData) {
+      var hrC = hrData.verdict === 'HIGH' ? '#3fb950' : hrData.verdict === 'MODERATE' ? '#d29922' : '#f85149';
+      var hrBg2 = hrData.verdict === 'HIGH' ? 'rgba(63,185,80,0.1)' : hrData.verdict === 'MODERATE' ? 'rgba(210,153,34,0.1)' : 'rgba(248,81,73,0.1)';
+      body += '<div style="padding:10px 14px;border-radius:6px;background:' + hrBg2 + ';border:1px solid ' + hrC + '30;margin-bottom:16px">';
+      body += '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#8b949e;margin-bottom:4px">Holdings Reliability vs Composer</div>';
+      body += '<span style="font-size:20px;font-weight:700;color:' + hrC + '">' + hrData.score + '/100 ' + hrData.verdict + '</span>';
+      body += '<div style="margin-top:4px;font-size:12px;color:#8b949e">';
+      body += 'Ticker overlap: ' + (hrData.avgTickerOverlap * 100).toFixed(0) + '% &middot; Weight overlap: ' + (hrData.avgWeightOverlap * 100).toFixed(0) + '% &middot; Exact match: ' + (hrData.exactMatchRate * 100).toFixed(0) + '% &middot; ' + hrData.daysChecked + ' days checked';
+      body += '</div>';
+      if (hrData.verdict === 'LOW' || hrData.verdict === 'UNRELIABLE') {
+        body += '<div style="margin-top:6px;font-size:11px;color:' + hrC + '">&#9888; Yahoo/Alpaca holdings diverge significantly from Composer. Intraday results may not be reliable for this strategy.</div>';
+      }
+      body += '</div>';
+    }
 
     // Summary: best of each mode
     body += '<div class="section">';

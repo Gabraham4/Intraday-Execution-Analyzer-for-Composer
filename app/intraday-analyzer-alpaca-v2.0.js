@@ -4177,6 +4177,103 @@ function computeWalkforward(dailyReturns, windowSize = 21, stepSize = 21) {
 }
 
 /**
+ * Holdings Reliability Check — compares our simulated holdings against Composer's
+ * actual backtest holdings across multiple days. Produces an overlap score (0-100)
+ * indicating how well our Yahoo/Alpaca-based strategy evaluation matches Composer's
+ * Xignite-based evaluation. Low scores mean the intraday analysis is unreliable
+ * because the baseline holdings are already wrong.
+ */
+function computeHoldingsReliability(score, dailyData, intradayData, composerHoldings, tradingDays) {
+  if (!composerHoldings || !composerHoldings.holdingsByDate) return null;
+
+  const composerDates = Object.keys(composerHoldings.holdingsByDate).sort();
+  if (composerDates.length === 0) return null;
+
+  // Check across the full backtest period — sample every 5th day to keep it fast
+  // while covering the entire time range for representative regime coverage
+  const ourDatesSet = new Set(tradingDays);
+  const commonDates = composerDates.filter(d => ourDatesSet.has(d));
+  const sampleDates = commonDates.filter((d, i) => i % 5 === 0 || i >= commonDates.length - 5);
+  // Always include last 5 days for recency
+
+  if (sampleDates.length < 3) return null;
+
+  let totalOverlap = 0;
+  let totalExactMatch = 0;
+  let totalWeightedOverlap = 0;
+  const perDay = [];
+
+  for (const date of sampleDates) {
+    const composerH = composerHoldings.holdingsByDate[date];
+    if (!composerH || composerH.length === 0) continue;
+
+    // Our holdings at 16:00 (Yahoo daily close — most internally consistent)
+    const ourH = getAssetsWithWeights(score, dailyData, intradayData, date, '16:00');
+    const ourFiltered = ourH.filter(h => h.weight > 0.001);
+
+    // Compute ticker overlap (Jaccard)
+    const composerSet = new Set(composerH.map(h => h.ticker));
+    const ourSet = new Set(ourFiltered.map(h => h.ticker));
+    const intersection = [...composerSet].filter(t => ourSet.has(t)).length;
+    const union = new Set([...composerSet, ...ourSet]).size;
+    const jaccard = union > 0 ? intersection / union : 0;
+
+    // Compute weight-adjusted overlap (sum of min weights for shared tickers)
+    const composerWeights = {};
+    const totalCW = composerH.reduce((s, h) => s + h.weight, 0);
+    for (const h of composerH) composerWeights[h.ticker] = h.weight / (totalCW || 1);
+    const ourWeights = {};
+    for (const h of ourFiltered) ourWeights[h.ticker] = h.weight;
+
+    let weightOverlap = 0;
+    for (const t of [...composerSet]) {
+      if (ourSet.has(t)) {
+        weightOverlap += Math.min(composerWeights[t] || 0, ourWeights[t] || 0);
+      }
+    }
+
+    const exactMatch = jaccard === 1.0 &&
+      ourFiltered.map(h => h.ticker + ':' + (h.weight * 100).toFixed(0)).sort().join(',') ===
+      composerH.map(h => h.ticker + ':' + ((h.weight / (totalCW || 1)) * 100).toFixed(0)).sort().join(',');
+
+    totalOverlap += jaccard;
+    totalWeightedOverlap += weightOverlap;
+    if (exactMatch) totalExactMatch++;
+    perDay.push({ date, jaccard, weightOverlap, exactMatch, composerTickers: composerSet.size, ourTickers: ourSet.size });
+  }
+
+  const n = perDay.length;
+  if (n === 0) return null;
+
+  const avgOverlap = totalOverlap / n;
+  const avgWeightedOverlap = totalWeightedOverlap / n;
+  const exactMatchRate = totalExactMatch / n;
+
+  // Composite reliability score (0-100)
+  // 50% ticker overlap + 30% weight overlap + 20% exact match rate
+  const reliabilityScore = Math.round(
+    avgOverlap * 50 + avgWeightedOverlap * 30 + exactMatchRate * 20
+  );
+
+  // Classify
+  let verdict;
+  if (reliabilityScore >= 80) verdict = 'HIGH';
+  else if (reliabilityScore >= 50) verdict = 'MODERATE';
+  else if (reliabilityScore >= 25) verdict = 'LOW';
+  else verdict = 'UNRELIABLE';
+
+  return {
+    score: reliabilityScore,
+    verdict,
+    avgTickerOverlap: avgOverlap,
+    avgWeightOverlap: avgWeightedOverlap,
+    exactMatchRate,
+    daysChecked: n,
+    perDay: perDay.slice(-5) // last 5 for display
+  };
+}
+
+/**
  * Tags WF/RC windows with SPY regime data for regime-dependent analysis.
  * Each window gets: spyReturn (%), regime ('bull'/'bear'/'sideways')
  * Thresholds: >3% = bull, <-3% = bear, else sideways (per ~21-day window)
@@ -5096,17 +5193,32 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
       const _tStart = Date.now();
       let eodResult;
       let baselineSource = 'simulated';
-      if (CONFIG.composerBaseline && hasComposerKeys()) {
+      let holdingsReliability = null;
+      let composerHoldingsData = null;
+
+      // Fetch Composer holdings for baseline and/or reliability check
+      if (hasComposerKeys()) {
         if (!quiet) console.log('  Fetching Composer baseline holdings...');
-        const composerHoldings = await fetchComposerBaselineHoldings(id, tradingDays[0], tradingDays[tradingDays.length - 1]);
-        if (composerHoldings) {
-          eodResult = runComposerBaselineBacktest(composerHoldings, dailyData, intradayData, tradingDays);
-          baselineSource = 'composer';
-          if (!quiet) console.log(`  Composer baseline: ${Object.keys(composerHoldings.holdingsByDate).length} days of holdings`);
-        } else {
-          if (!quiet) console.log('  Composer baseline unavailable, falling back to simulated EOD');
-          eodResult = runEODOnlyBacktest(score, dailyData, intradayData, tradingDays, rbThreshold);
+        composerHoldingsData = await fetchComposerBaselineHoldings(id, tradingDays[0], tradingDays[tradingDays.length - 1]);
+      }
+
+      // Holdings reliability check — compare our simulated holdings vs Composer actual
+      if (composerHoldingsData) {
+        holdingsReliability = computeHoldingsReliability(score, dailyData, intradayData, composerHoldingsData, tradingDays);
+        if (holdingsReliability && !quiet) {
+          const hr = holdingsReliability;
+          const color = hr.verdict === 'HIGH' ? '\x1b[32m' : hr.verdict === 'MODERATE' ? '\x1b[33m' : '\x1b[31m';
+          console.log(`  Holdings reliability: ${color}${hr.score}/100 ${hr.verdict}\x1b[0m (${(hr.avgTickerOverlap*100).toFixed(0)}% ticker overlap, ${(hr.exactMatchRate*100).toFixed(0)}% exact match across ${hr.daysChecked} days)`);
         }
+      }
+
+      if (CONFIG.composerBaseline && composerHoldingsData) {
+        eodResult = runComposerBaselineBacktest(composerHoldingsData, dailyData, intradayData, tradingDays);
+        baselineSource = 'composer';
+        if (!quiet) console.log(`  Composer baseline: ${Object.keys(composerHoldingsData.holdingsByDate).length} days of holdings`);
+      } else if (CONFIG.composerBaseline && !composerHoldingsData) {
+        if (!quiet) console.log('  Composer baseline unavailable, falling back to simulated EOD');
+        eodResult = runEODOnlyBacktest(score, dailyData, intradayData, tradingDays, rbThreshold);
       } else {
         eodResult = runEODOnlyBacktest(score, dailyData, intradayData, tradingDays, rbThreshold);
       }
@@ -5186,6 +5298,7 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
         name,
         tradingDays: eodResult.tradingDays,
         dateRange: `${tradingDays[0]} to ${tradingDays[tradingDays.length-1]}`,
+        holdingsReliability: holdingsReliability || null,
         eod: {
           cumReturn: eodResult.cumReturn,
           annReturn: annualizedReturn(eodResult.cumReturn, eodResult.tradingDays),
@@ -5349,6 +5462,7 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
         name,
         tradingDays: eodResult.tradingDays,
         dateRange: `${tradingDays[0]} to ${tradingDays[tradingDays.length-1]}`,
+        holdingsReliability: holdingsReliability || null,
         eod: {
           cumReturn: eodResult.cumReturn,
           annReturn: annualizedReturn(eodResult.cumReturn, eodResult.tradingDays),
@@ -5511,6 +5625,7 @@ async function cashTimeAnalysis(ids, intradayDays, quiet = false) {
         name,
         tradingDays: eodResult.tradingDays,
         dateRange: `${tradingDays[0]} to ${tradingDays[tradingDays.length-1]}`,
+        holdingsReliability: holdingsReliability || null,
         eod: {
           cumReturn: eodResult.cumReturn,
           annReturn: annualizedReturn(eodResult.cumReturn, eodResult.tradingDays),
@@ -6050,6 +6165,7 @@ async function combinedAnalysis(ids, intradayDays, quiet = false) {
       tradingDays: dual.tradingDays,
       dateRange: dual.dateRange,
       baselineSource: dual.baselineSource || 'simulated',
+      holdingsReliability: dual.holdingsReliability || null,
       eod: dual.eod,
       dual: {
         bestTime: dual.bestTime,
