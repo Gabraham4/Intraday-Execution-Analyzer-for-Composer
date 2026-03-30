@@ -60,6 +60,10 @@ function saveGUISettings(updates) {
     const et = parseFloat(saved.executionThreshold);
     analyzer.CONFIG.executionThreshold = et > 0 ? et : null;
   }
+  if (saved.takeProfitThreshold) {
+    const tp = parseFloat(saved.takeProfitThreshold);
+    analyzer.CONFIG.takeProfitThreshold = tp !== 0 ? tp : null;
+  }
 })();
 
 // ============================================================================
@@ -171,16 +175,47 @@ function buildReportHTML(r, mode) {
 
   function buildSingleWfPanel(wf, altLabel) {
     var s = wf.summary;
+    var hasRegime = wf.windows.length > 0 && wf.windows[0].regime;
     var h = '';
-    h += '<table><thead><tr><th>Period</th><th>EOD</th><th>' + esc(altLabel) + '</th><th>Alpha</th></tr></thead><tbody>';
+    h += '<table><thead><tr><th>Period</th><th>EOD</th><th>' + esc(altLabel) + '</th><th>Alpha</th>';
+    if (hasRegime) h += '<th>SPY</th><th>Regime</th>';
+    h += '</tr></thead><tbody>';
     for (var wi = 0; wi < wf.windows.length; wi++) {
       var w = wf.windows[wi];
       h += '<tr><td>' + w.startDate + ' \u2192 ' + w.endDate.slice(5) + '</td>';
       h += '<td>' + pct(w.eodCum, 1) + '</td>';
       h += '<td>' + pct(w.altCum, 1) + '</td>';
-      h += '<td class="' + (w.win ? 'pos' : 'neg') + '">' + pct(w.alpha, 1) + (w.win ? ' +' : ' \u2212') + '</td></tr>';
+      h += '<td class="' + (w.win ? 'pos' : 'neg') + '">' + pct(w.alpha, 1) + (w.win ? ' +' : ' \u2212') + '</td>';
+      if (hasRegime) {
+        var regColor = w.regime === 'bull' ? '#3fb950' : w.regime === 'bear' ? '#f85149' : '#d29922';
+        h += '<td class="' + (w.spyReturn >= 0 ? 'pos' : 'neg') + '">' + (w.spyReturn != null ? pct(w.spyReturn, 1) : '\u2014') + '</td>';
+        h += '<td style="color:' + regColor + ';font-size:11px">' + (w.regime || '') + '</td>';
+      }
+      h += '</tr>';
     }
     h += '</tbody></table>';
+    // Regime summary: alpha by regime
+    if (hasRegime) {
+      var regimes = { bull: { wins: 0, total: 0, alphaSum: 0 }, bear: { wins: 0, total: 0, alphaSum: 0 }, sideways: { wins: 0, total: 0, alphaSum: 0 } };
+      for (var ri = 0; ri < wf.windows.length; ri++) {
+        var rw = wf.windows[ri];
+        if (rw.regime && regimes[rw.regime]) {
+          regimes[rw.regime].total++;
+          if (rw.win) regimes[rw.regime].wins++;
+          regimes[rw.regime].alphaSum += rw.alpha;
+        }
+      }
+      h += '<div style="font-size:11px;margin-top:6px;color:#8b949e">Regime breakdown: ';
+      var parts = [];
+      for (var rk in regimes) {
+        var rr = regimes[rk];
+        if (rr.total > 0) {
+          var clr = rk === 'bull' ? '#3fb950' : rk === 'bear' ? '#f85149' : '#d29922';
+          parts.push('<span style="color:' + clr + '">' + rk + '</span>: ' + rr.wins + '/' + rr.total + ' wins, avg ' + (rr.alphaSum / rr.total).toFixed(1) + '%');
+        }
+      }
+      h += parts.join(' | ') + '</div>';
+    }
     var vClass = s.verdict === 'CONSISTENT' ? 'rec-add' : s.verdict === 'EPISODIC' ? 'rec-keep' : 'rec-warn';
     var vDesc = s.verdict === 'CONSISTENT' ? 'Alpha is persistent and reliable'
       : s.verdict === 'EPISODIC' ? 'Alpha is real but regime-dependent'
@@ -322,14 +357,23 @@ function buildReportHTML(r, mode) {
 
   function buildCandidateOOSPanel(candidateOOS, time) {
     if (!candidateOOS || !candidateOOS.windows || candidateOOS.windows.length === 0) return '';
-    var h = '<table><thead><tr><th>Test Period</th><th>OOS Alpha</th><th>Win?</th><th>Training Chose</th></tr></thead><tbody>';
+    var hasRegime = candidateOOS.windows[0].regime;
+    var h = '<table><thead><tr><th>Test Period</th><th>OOS Alpha</th><th>Win?</th><th>Training Chose</th>';
+    if (hasRegime) h += '<th>SPY</th><th>Regime</th>';
+    h += '</tr></thead><tbody>';
     for (var i = 0; i < candidateOOS.windows.length; i++) {
       var w = candidateOOS.windows[i];
       var c2 = w.win ? 'pos' : 'neg';
       h += '<tr><td style="white-space:nowrap;font-size:12px">' + w.testStart + ' \u2192 ' + w.testEnd.slice(5) + '</td>';
       h += '<td class="' + c2 + '">' + pct(w.testAlpha, 1) + '</td>';
       h += '<td class="' + c2 + '">' + (w.win ? '+' : '\u2212') + '</td>';
-      h += '<td style="font-size:11px;color:#8b949e">' + (w.chosenInTraining || '\u2014') + '</td></tr>';
+      h += '<td style="font-size:11px;color:#8b949e">' + (w.chosenInTraining || '\u2014') + '</td>';
+      if (hasRegime) {
+        var regColor = w.regime === 'bull' ? '#3fb950' : w.regime === 'bear' ? '#f85149' : '#d29922';
+        h += '<td class="' + (w.spyReturn >= 0 ? 'pos' : 'neg') + '">' + (w.spyReturn != null ? pct(w.spyReturn, 1) : '\u2014') + '</td>';
+        h += '<td style="color:' + regColor + ';font-size:11px">' + (w.regime || '') + '</td>';
+      }
+      h += '</tr>';
     }
     h += '</tbody></table>';
     h += '<div style="font-size:12px;margin-top:6px;color:#8b949e">';
@@ -749,6 +793,7 @@ async function handleRequest(req, res) {
         eodTime: analyzer.CONFIG.EOD_TIME,
         baselineSource: analyzer.CONFIG.composerBaseline ? 'composer' : 'simulated',
         executionThreshold: analyzer.CONFIG.executionThreshold ? String(analyzer.CONFIG.executionThreshold) : '0',
+        takeProfitThreshold: analyzer.CONFIG.takeProfitThreshold ? String(analyzer.CONFIG.takeProfitThreshold) : '0',
         testTimes: analyzer.CONFIG.TEST_TIMES,
         maxIntradayDays: analyzer.CONFIG.MAX_INTRADAY_DAYS,
         dataSource: analyzer.CONFIG.dataSource,
@@ -1004,6 +1049,13 @@ async function handleRequest(req, res) {
         guiUpdates.executionThreshold = body.executionThreshold;
       }
 
+      // Take-profit threshold setting
+      if (body.takeProfitThreshold !== undefined) {
+        const tp = parseFloat(body.takeProfitThreshold);
+        analyzer.CONFIG.takeProfitThreshold = tp !== 0 ? tp : null;
+        guiUpdates.takeProfitThreshold = body.takeProfitThreshold;
+      }
+
       // Persist to gui-settings.json
       if (Object.keys(guiUpdates).length > 0) {
         saveGUISettings(guiUpdates);
@@ -1016,6 +1068,7 @@ async function handleRequest(req, res) {
         testTimes: analyzer.CONFIG.TEST_TIMES,
         baselineSource: analyzer.CONFIG.composerBaseline ? 'composer' : 'simulated',
         executionThreshold: analyzer.CONFIG.executionThreshold ? String(analyzer.CONFIG.executionThreshold) : '0',
+        takeProfitThreshold: analyzer.CONFIG.takeProfitThreshold ? String(analyzer.CONFIG.takeProfitThreshold) : '0',
       });
       return;
     }
@@ -1494,6 +1547,19 @@ const FRONTEND_HTML = `<!DOCTYPE html>
         </select>
         <div class="hint">Minimum allocation change to trigger intraday "Run Now". Matches the n8n workflow's skip rule. Below this threshold, the morning execution is skipped and holdings drift to EOD.</div>
       </div>
+      <div class="modal-row">
+        <label>Take-Profit Filter</label>
+        <select id="settingTakeProfit">
+          <option value="0">Off (execute regardless of P&L)</option>
+          <option value="0.005">0.5% portfolio gain</option>
+          <option value="0.01">1% portfolio gain</option>
+          <option value="0.02">2% portfolio gain</option>
+          <option value="0.03">3% portfolio gain</option>
+          <option value="-0.01">-1% (also execute on red days > -1%)</option>
+          <option value="-0.02">-2% (also execute on red days > -2%)</option>
+        </select>
+        <div class="hint">Only execute intraday "Run Now" when the portfolio is up by at least this much since yesterday's close. Filters out flat/red days to focus intraday trades on profitable momentum.</div>
+      </div>
       <div class="modal-actions">
         <button class="cancel" onclick="closeSettings()">Cancel</button>
         <button class="save" onclick="saveGeneralSettings()">Save</button>
@@ -1611,6 +1677,7 @@ function updateConfigUI() {
   buildEodOptions();
   document.getElementById('settingBaseline').value = config.baselineSource || 'simulated';
   document.getElementById('settingExecThreshold').value = config.executionThreshold || '0';
+  document.getElementById('settingTakeProfit').value = config.takeProfitThreshold || '0';
   onBaselineChange();
 
   // API Keys tab hints
@@ -2785,18 +2852,20 @@ async function saveGeneralSettings() {
   var eodTime = document.getElementById('settingEod').value;
   var baselineSource = document.getElementById('settingBaseline').value;
   var execThreshold = document.getElementById('settingExecThreshold').value;
+  var takeProfit = document.getElementById('settingTakeProfit').value;
 
   try {
     var resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ alpacaTimeframe: timeframe, eodTime: eodTime, baselineSource: baselineSource, executionThreshold: execThreshold }),
+      body: JSON.stringify({ alpacaTimeframe: timeframe, eodTime: eodTime, baselineSource: baselineSource, executionThreshold: execThreshold, takeProfitThreshold: takeProfit }),
     });
     var data = await resp.json();
     config.alpacaTimeframe = data.alpacaTimeframe;
     config.eodTime = data.eodTime;
     config.baselineSource = data.baselineSource || 'simulated';
     config.executionThreshold = data.executionThreshold || '0';
+    config.takeProfitThreshold = data.takeProfitThreshold || '0';
     if (data.testTimes) config.testTimes = data.testTimes;
     updateConfigUI();
     closeSettings();

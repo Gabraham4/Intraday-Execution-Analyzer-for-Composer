@@ -63,6 +63,7 @@ const CONFIG = {
   wfMaxCandidates: 10,            // Max candidate times for WF testing (both tiers)
   composerBaseline: false,        // Use Composer's actual backtest holdings as EOD baseline
   executionThreshold: null,       // Min allocation change to trigger intraday execution (e.g., 0.05 = 5%). Matches n8n's 5% skip rule. null = always execute.
+  takeProfitThreshold: null,      // Min portfolio gain since prev EOD to trigger intraday execution (e.g., 0.01 = 1%). Only execute Run Now on "green" days. null = disabled.
   dateStart: null,                // Custom backtest start date (YYYY-MM-DD) or null for all
   dateEnd: null,                  // Custom backtest end date (YYYY-MM-DD) or null for all
 };
@@ -3305,6 +3306,31 @@ function passesExecutionThreshold(currentHoldings, targetHoldings, dailyData, in
 }
 
 /**
+ * Checks if the portfolio is up enough since previous EOD to justify an intraday execution.
+ * Only execute Run Now on "green" days where portfolio gain exceeds the take-profit threshold.
+ * Returns true if gain >= threshold (or threshold is disabled).
+ */
+function passesTakeProfitThreshold(holdings, dailyData, intradayData, prevDate, currDate, morningTime) {
+  const tpThreshold = CONFIG.takeProfitThreshold;
+  if (tpThreshold === null || tpThreshold === undefined) return true; // disabled = always pass
+  if (!prevDate || holdings.length === 0) return true; // no prior data = pass
+
+  // Compute portfolio return from prevDate EOD to currDate morning
+  let portfolioReturn = 0;
+  let totalWeight = 0;
+  for (const h of holdings) {
+    const prevEOD = getIntradayPrice(h.ticker, intradayData, prevDate, CONFIG.EOD_TIME, dailyData);
+    const currMorning = getIntradayPrice(h.ticker, intradayData, currDate, morningTime, dailyData);
+    if (prevEOD && currMorning && prevEOD > 0) {
+      portfolioReturn += h.weight * ((currMorning - prevEOD) / prevEOD);
+      totalWeight += h.weight;
+    }
+  }
+
+  return portfolioReturn >= tpThreshold;
+}
+
+/**
  * Computes drifted weights after price movement (for non-rebalance days).
  * Returns new holdings array with updated weights reflecting actual portfolio proportions.
  */
@@ -3571,19 +3597,20 @@ function runDualTimeBacktest(score, dailyData, intradayData, tradingDays, mornin
       }
     }
 
-    // Morning rebalance (threshold-aware + execution threshold)
-    // Execution threshold mirrors n8n's 5% skip rule: if the allocation change
-    // is too small, don't execute the intraday "Run Now" — just drift holdings to EOD.
+    // Morning rebalance (threshold-aware + execution threshold + take-profit filter)
+    // Execution threshold: skip if allocation change too small (n8n 5% rule)
+    // Take-profit threshold: only execute on "green" days (portfolio up since prev EOD)
     const morningExecPass = passesExecutionThreshold(holdings, morningSelection, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime);
+    const morningTPPass = passesTakeProfitThreshold(holdings, dailyData, intradayData, prevDate, date, morningTime);
 
-    if (morningExecPass && morningSelection.length > 0) {
+    if (morningExecPass && morningTPPass && morningSelection.length > 0) {
       if (shouldRebalance(holdings, morningSelection, rebalanceThreshold, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime)) {
         holdings = morningSelection;
       } else if (prevDate && holdings.length > 0) {
         holdings = getDriftedWeights(holdings, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime);
       }
-    } else if (!morningExecPass && prevDate && holdings.length > 0) {
-      // Below execution threshold — skip Run Now, just drift to morning time
+    } else if ((!morningExecPass || !morningTPPass) && prevDate && holdings.length > 0) {
+      // Below execution/take-profit threshold — skip Run Now, just drift to morning time
       holdings = getDriftedWeights(holdings, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime);
     } else if (morningSelection.length === 0) {
       holdings = []; // Cash signal: liquidate
@@ -3866,16 +3893,17 @@ function runDualVsEodBacktestDaily(score, dailyData, intradayData, tradingDays, 
       if (totalWeight > 0) dualEquity *= (1 + overnightReturn);
     }
 
-    // Morning rebalance (threshold-aware + execution threshold)
+    // Morning rebalance (threshold-aware + execution threshold + take-profit filter)
     const dualExecPass = passesExecutionThreshold(dualHoldings, morningSelection, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime);
+    const dualTPPass = passesTakeProfitThreshold(dualHoldings, dailyData, intradayData, prevDate, date, morningTime);
 
-    if (dualExecPass && morningSelection.length > 0) {
+    if (dualExecPass && dualTPPass && morningSelection.length > 0) {
       if (shouldRebalance(dualHoldings, morningSelection, rebalanceThreshold, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime)) {
         dualHoldings = morningSelection;
       } else if (prevDate && dualHoldings.length > 0) {
         dualHoldings = getDriftedWeights(dualHoldings, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime);
       }
-    } else if (!dualExecPass && prevDate && dualHoldings.length > 0) {
+    } else if ((!dualExecPass || !dualTPPass) && prevDate && dualHoldings.length > 0) {
       dualHoldings = getDriftedWeights(dualHoldings, dailyData, intradayData, prevDate, date, CONFIG.EOD_TIME, morningTime);
     } else if (morningSelection.length === 0) {
       dualHoldings = [];
@@ -4146,6 +4174,93 @@ function computeWalkforward(dailyReturns, windowSize = 21, stepSize = 21) {
       recentAlpha
     }
   };
+}
+
+/**
+ * Tags WF/RC windows with SPY regime data for regime-dependent analysis.
+ * Each window gets: spyReturn (%), regime ('bull'/'bear'/'sideways')
+ * Thresholds: >3% = bull, <-3% = bear, else sideways (per ~21-day window)
+ */
+function tagRegimeData(wfResults, dailyData) {
+  if (!wfResults || !dailyData) return;
+  const spyData = dailyData['SPY']?.byDate;
+  if (!spyData) return; // SPY not in dataset
+
+  for (const time in wfResults) {
+    const wf = wfResults[time];
+    if (!wf || !wf.windows) continue;
+    for (const win of wf.windows) {
+      const startClose = spyData[win.startDate]?.close;
+      // Find closest date <= endDate for SPY close
+      let endClose = spyData[win.endDate]?.close;
+      if (!endClose) {
+        // Try a few days before endDate
+        const dates = Object.keys(spyData).sort();
+        for (let i = dates.length - 1; i >= 0; i--) {
+          if (dates[i] <= win.endDate) { endClose = spyData[dates[i]]?.close; break; }
+        }
+      }
+      if (startClose && endClose && startClose > 0) {
+        const spyReturn = ((endClose - startClose) / startClose) * 100;
+        win.spyReturn = spyReturn;
+        win.regime = spyReturn > 3 ? 'bull' : spyReturn < -3 ? 'bear' : 'sideways';
+      } else {
+        win.spyReturn = null;
+        win.regime = 'unknown';
+      }
+    }
+  }
+}
+
+/**
+ * Tags OOS walkforward windows with SPY regime data.
+ */
+function tagOOSRegimeData(oosWalkforward, dailyData) {
+  if (!oosWalkforward || !dailyData) return;
+  const spyData = dailyData['SPY']?.byDate;
+  if (!spyData) return;
+
+  // Tag the headline windows
+  if (oosWalkforward.windows) {
+    for (const win of oosWalkforward.windows) {
+      const startClose = spyData[win.testStart]?.close;
+      let endClose = spyData[win.testEnd]?.close;
+      if (!endClose) {
+        const dates = Object.keys(spyData).sort();
+        for (let i = dates.length - 1; i >= 0; i--) {
+          if (dates[i] <= win.testEnd) { endClose = spyData[dates[i]]?.close; break; }
+        }
+      }
+      if (startClose && endClose && startClose > 0) {
+        const spyReturn = ((endClose - startClose) / startClose) * 100;
+        win.spyReturn = spyReturn;
+        win.regime = spyReturn > 3 ? 'bull' : spyReturn < -3 ? 'bear' : 'sideways';
+      }
+    }
+  }
+
+  // Tag per-candidate OOS windows
+  if (oosWalkforward.perCandidateOOS) {
+    for (const time in oosWalkforward.perCandidateOOS) {
+      const candidate = oosWalkforward.perCandidateOOS[time];
+      if (!candidate || !candidate.windows) continue;
+      for (const win of candidate.windows) {
+        const startClose = spyData[win.testStart]?.close;
+        let endClose = spyData[win.testEnd]?.close;
+        if (!endClose) {
+          const dates = Object.keys(spyData).sort();
+          for (let i = dates.length - 1; i >= 0; i--) {
+            if (dates[i] <= win.testEnd) { endClose = spyData[dates[i]]?.close; break; }
+          }
+        }
+        if (startClose && endClose && startClose > 0) {
+          const spyReturn = ((endClose - startClose) / startClose) * 100;
+          win.spyReturn = spyReturn;
+          win.regime = spyReturn > 3 ? 'bull' : spyReturn < -3 ? 'bear' : 'sideways';
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -5049,6 +5164,10 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
         }
       }
 
+      // Tag regime data (SPY performance per window)
+      if (allWalkforwardResults) tagRegimeData(allWalkforwardResults, dailyData);
+      if (oosWalkforward) tagOOSRegimeData(oosWalkforward, dailyData);
+
       // Phase 4: Final composite scoring
       const { compositeScores, bestTime, bestImprovement } = computeFinalScores(
         timeResults, baseScores, robustnessScores, oosScores, candidates,
@@ -5210,6 +5329,9 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
         }
       }
 
+      if (allWalkforwardResults) tagRegimeData(allWalkforwardResults, dailyData);
+      if (oosWalkforward) tagOOSRegimeData(oosWalkforward, dailyData);
+
       const { compositeScores, bestTime, bestImprovement } = computeFinalScores(
         timeResults, baseScores, robustnessScores, oosScores, candidates,
         CONFIG.walkforward, CONFIG.oosWalkforward);
@@ -5368,6 +5490,9 @@ async function cashTimeAnalysis(ids, intradayDays, quiet = false) {
           oosScores = computeOOSScores(oosWalkforward.perCandidateOOS, candidates);
         }
       }
+
+      if (allWalkforwardResults) tagRegimeData(allWalkforwardResults, dailyData);
+      if (oosWalkforward) tagOOSRegimeData(oosWalkforward, dailyData);
 
       const { compositeScores, bestTime, bestImprovement } = computeFinalScores(
         timeResults, baseScores, robustnessScores, oosScores, candidates,
