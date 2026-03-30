@@ -4190,11 +4190,12 @@ function computeHoldingsReliability(score, dailyData, intradayData, composerHold
   const composerDates = Object.keys(composerHoldings.holdingsByDate).sort();
   if (composerDates.length === 0) return null;
 
-  // Check across the full backtest period — sample every 5th day to keep it fast
-  // while covering the entire time range for representative regime coverage
+  // Check every day across the full backtest period
+  // The cost is minimal (~1ms per day for getAssetsWithWeights tree walk)
+  // and checking every day gives the most accurate reliability picture
   const ourDatesSet = new Set(tradingDays);
   const commonDates = composerDates.filter(d => ourDatesSet.has(d));
-  const sampleDates = commonDates.filter((d, i) => i % 5 === 0 || i >= commonDates.length - 5);
+  const sampleDates = commonDates;
 
   if (sampleDates.length < 3) return null;
 
@@ -4253,7 +4254,7 @@ function computeHoldingsReliability(score, dailyData, intradayData, composerHold
     else if (reliabilityScore >= 25) verdict = 'LOW';
     else verdict = 'UNRELIABLE';
 
-    return { score: reliabilityScore, verdict, avgTickerOverlap: avgOverlap, avgWeightOverlap: avgWeightedOverlap, exactMatchRate, daysChecked: n, perDay: perDay.slice(-5) };
+    return { score: reliabilityScore, verdict, avgTickerOverlap: avgOverlap, avgWeightOverlap: avgWeightedOverlap, exactMatchRate, daysChecked: n, perDay: perDay.slice(-10) };
   }
 
   const yahoo = computeOverlapStats('16:00');    // Yahoo daily close
