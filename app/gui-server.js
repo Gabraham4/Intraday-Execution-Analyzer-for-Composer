@@ -1587,37 +1587,19 @@ const FRONTEND_HTML = `<!DOCTYPE html>
         <div class="hint">Only applies to Custom Yahoo mode. Composer Backtest uses Composer's own trading window.</div>
       </div>
       <div class="modal-row">
-        <label>Execution Threshold</label>
-        <select id="settingExecThreshold">
-          <option value="0">None (always execute)</option>
-          <option value="0.03">3% min allocation change</option>
-          <option value="0.05">5% min allocation change (matches n8n)</option>
-          <option value="0.10">10% min allocation change</option>
-        </select>
-        <div class="hint">Minimum allocation change to trigger intraday "Run Now". Matches the n8n workflow's skip rule. Below this threshold, the morning execution is skipped and holdings drift to EOD.</div>
+        <label>Execution Threshold (%)</label>
+        <input type="number" id="settingExecThreshold" step="0.5" min="0" max="50" placeholder="0" style="width:80px">
+        <div class="hint">Min allocation change (%) to trigger intraday Run Now. 0 = always execute. Typical: 5% (skips trivial rebalances). Enter as whole number (e.g., 5 for 5%).</div>
       </div>
       <div class="modal-row">
-        <label>Take-Profit Filter</label>
-        <select id="settingTakeProfit">
-          <option value="0">Off (execute regardless of P&L)</option>
-          <option value="0.005">0.5% portfolio gain</option>
-          <option value="0.01">1% portfolio gain</option>
-          <option value="0.02">2% portfolio gain</option>
-          <option value="0.03">3% portfolio gain</option>
-          <option value="-0.01">-1% (also execute on red days > -1%)</option>
-          <option value="-0.02">-2% (also execute on red days > -2%)</option>
-        </select>
-        <div class="hint">Only execute intraday "Run Now" when the portfolio is up by at least this much since yesterday's close. Filters out flat/red days to focus intraday trades on profitable momentum.</div>
+        <label>Take-Profit Filter (%)</label>
+        <input type="number" id="settingTakeProfit" step="0.1" min="-10" max="10" placeholder="0" style="width:80px">
+        <div class="hint">Only execute Run Now when portfolio is up at least this % since yesterday's close. 0 = off. Positive = green days only (e.g., 1). Negative = also execute on small red days (e.g., -1).</div>
       </div>
       <div class="modal-row">
-        <label>Min Reliability to Run</label>
-        <select id="settingMinReliability">
-          <option value="0">Off (always run, just show badge)</option>
-          <option value="25">25+ (skip UNRELIABLE only)</option>
-          <option value="50">50+ (skip LOW and UNRELIABLE)</option>
-          <option value="80">80+ (only run HIGH reliability)</option>
-        </select>
-        <div class="hint">Minimum holdings reliability score vs Composer to proceed with backtests. Strategies below this threshold are skipped — saves time on strategies where our data can't replicate Composer's holdings. Requires Composer API keys.</div>
+        <label>Min Reliability Score</label>
+        <input type="number" id="settingMinReliability" step="5" min="0" max="100" placeholder="0" style="width:80px">
+        <div class="hint">Min holdings overlap score (0-100) vs Composer to proceed with backtesting. 0 = off. Recommended: 25 (skip unreliable). 50+ for strict. Requires Composer API keys.</div>
       </div>
       <div class="modal-actions">
         <button class="cancel" onclick="closeSettings()">Cancel</button>
@@ -1735,9 +1717,9 @@ function updateConfigUI() {
   document.getElementById('settingTimeframe').value = config.alpacaTimeframe || '15Min';
   buildEodOptions();
   document.getElementById('settingBaseline').value = config.baselineSource || 'simulated';
-  document.getElementById('settingExecThreshold').value = config.executionThreshold || '0';
-  document.getElementById('settingTakeProfit').value = config.takeProfitThreshold || '0';
-  document.getElementById('settingMinReliability').value = config.minReliability || '25';
+  document.getElementById('settingExecThreshold').value = config.executionThreshold ? (parseFloat(config.executionThreshold) * 100).toFixed(0) : '0';
+  document.getElementById('settingTakeProfit').value = config.takeProfitThreshold ? (parseFloat(config.takeProfitThreshold) * 100).toFixed(1) : '0';
+  document.getElementById('settingMinReliability').value = config.minReliability || '0';
   onBaselineChange();
 
   // API Keys tab hints
@@ -2931,15 +2913,18 @@ async function saveGeneralSettings() {
   var timeframe = document.getElementById('settingTimeframe').value;
   var eodTime = document.getElementById('settingEod').value;
   var baselineSource = document.getElementById('settingBaseline').value;
-  var execThreshold = document.getElementById('settingExecThreshold').value;
-  var takeProfit = document.getElementById('settingTakeProfit').value;
-  var minReliability = document.getElementById('settingMinReliability').value;
+  var execThresholdPct = parseFloat(document.getElementById('settingExecThreshold').value) || 0;
+  var takeProfitPct = parseFloat(document.getElementById('settingTakeProfit').value) || 0;
+  var minReliability = parseInt(document.getElementById('settingMinReliability').value) || 0;
+  // Convert display % to internal decimal (5% -> 0.05)
+  var execThreshold = String(execThresholdPct / 100);
+  var takeProfit = String(takeProfitPct / 100);
 
   try {
     var resp = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ alpacaTimeframe: timeframe, eodTime: eodTime, baselineSource: baselineSource, executionThreshold: execThreshold, takeProfitThreshold: takeProfit, minReliability: minReliability }),
+      body: JSON.stringify({ alpacaTimeframe: timeframe, eodTime: eodTime, baselineSource: baselineSource, executionThreshold: execThreshold, takeProfitThreshold: takeProfit, minReliability: String(minReliability) }),
     });
     var data = await resp.json();
     config.alpacaTimeframe = data.alpacaTimeframe;

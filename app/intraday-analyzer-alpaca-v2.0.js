@@ -5351,7 +5351,8 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
 
 async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
   const results = [];
-  const dailyDays = CONFIG.MAX_DAILY_DAYS;  // Full history for SMA(360), cumret(252), etc.
+  const dailyDays = CONFIG.MAX_DAILY_DAYS;
+  const holdingsReliability = null; // Only computed in dual analysis; single/cash inherit via combined results
 
   for (let i = 0; i < ids.length; i++) {
     const id = ids[i];
@@ -5515,6 +5516,7 @@ async function singleTimeAnalysis(ids, intradayDays, quiet = false) {
 async function cashTimeAnalysis(ids, intradayDays, quiet = false) {
   const results = [];
   const dailyDays = CONFIG.MAX_DAILY_DAYS;
+  const holdingsReliability = null; // Only computed in dual analysis; single/cash inherit via combined results
 
   for (let i = 0; i < ids.length; i++) {
     const id = ids[i];
