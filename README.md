@@ -10,11 +10,16 @@ Find the best time of day to execute your [Composer.trade](https://www.composer.
 - **Two-tier walk-forward validation:**
   - **Robustness Check** (post-hoc slicing) — Slices completed backtest into 21-day windows to verify alpha is consistent, not concentrated in outliers
   - **Walk-Forward Test** (true OOS) — Trains on rolling 63-day windows, picks best time using only past data, tests on next unseen 21-day window. Simulates real-time decision-making.
+- **SPY Regime Analysis** — RC and OOS windows are tagged with SPY return and market regime (bull/bear/sideways). A regime breakdown summary shows win rate per regime, revealing whether alpha is regime-dependent.
 - **Smart candidate selection** — Walk-forward testing runs only on the top 10 candidates (not all times), selected by base scoring with positive improvement required
+- **Holdings Reliability Check** — Pre-analysis quality gate comparing simulated holdings vs Composer's actual Xignite-based holdings. Shows both Yahoo and Alpaca overlap scores with verdicts: HIGH, MODERATE, LOW, or UNRELIABLE. Configurable minimum threshold to skip strategies that cannot be reliably simulated.
+- **Execution Filters** — Minimum allocation change threshold (e.g., 5%) to trigger intraday Run Now, matching n8n workflow skip rules. Take-profit filter to only execute on days where the portfolio is up X% since previous close (options: Off, 0.5%, 1%, 2%, 3%, or negative thresholds).
+- **Clickable Mode Tabs** — Combined reports use clickable Dual/Single/Cash tab cards instead of vertical scrolling for faster navigation between modes.
 - **Unified tab interface** — Click any candidate time to see both Robustness Check and Walk-Forward Test results side-by-side
 - **Web GUI** — Browser-based dashboard with interactive results and HTML report export
 - **Full CLI** — Scriptable command-line interface for automation and batch analysis
 - **Alpaca data** — Up to 2 years of 5-minute or 15-minute intraday bars via free Alpaca paper account
+- **Data source resilience** — Missing Alpaca day fallback for all times, early-close day handling, and multiple EOD data source options including Alpaca bar close
 - **Composer API integration** — Browse and select strategies directly from your portfolio/watchlist
 - **Zero dependencies** — Pure Node.js, no npm install required
 
@@ -156,8 +161,46 @@ For each strategy, the analyzer:
 
 In Settings, you can choose between two EOD baseline sources:
 
-- **Custom Yahoo EOD** — Simulates strategy evaluation using Yahoo Finance daily closes. Works without Composer API keys. EOD time is configurable (15:45, 15:50, 15:55, 16:00).
-- **Composer Backtest** — Uses Composer's actual backtest equity curve (`dvm_capital`) with Xignite prices. This is the ground truth — the exact returns Composer would have produced. Requires Composer API keys. The EOD time selector is disabled in this mode since Composer uses its own fixed trading window.
+- **Custom Yahoo EOD** — Simulates strategy evaluation using Yahoo Finance daily closes. Works without Composer API keys. EOD time is configurable (see options below).
+- **Composer Backtest** — Uses Composer's actual backtest equity curve (`dvm_capital`) with Xignite prices. This is the ground truth — the exact returns Composer would have produced. Requires Composer API keys. The EOD time selector is disabled in this mode since Composer uses its own fixed trading window. Report filenames include 'composer' when this baseline is selected.
+
+### EOD Time Options
+
+| Time | Source | Description |
+|------|--------|-------------|
+| 15:45 | Alpaca | Alpaca bar open price at 15:45 |
+| 16:00 | Yahoo | Yahoo Finance daily close price |
+| 16:00a | Alpaca | Alpaca bar close price at 16:00 |
+| Composer Backtest | Xignite | Composer's own backtest equity curve (ground truth) |
+
+Labels in the UI indicate which data source is used for each option.
+
+## Holdings Reliability Check
+
+Before running a full analysis, the analyzer performs a quality gate by comparing its simulated holdings against Composer's actual Xignite-based holdings. This catches strategies where the Yahoo/Alpaca price data diverges enough from Xignite to produce different condition evaluations.
+
+The check shows both Yahoo and Alpaca overlap scores and assigns a verdict:
+
+| Verdict | Overlap | Meaning |
+|---------|---------|---------|
+| **HIGH** | 90%+ | Simulation closely matches Composer. Results are trustworthy. |
+| **MODERATE** | 70-89% | Some divergence. Results are directionally useful but review edge cases. |
+| **LOW** | 50-69% | Significant divergence. Take results with a grain of salt. |
+| **UNRELIABLE** | <50% | Simulation does not reflect Composer's behavior. Strategy is skipped. |
+
+The minimum reliability threshold is configurable in Settings. Strategies that fall below it are automatically skipped during batch analysis.
+
+## Execution Filters
+
+Two filters control when an intraday "Run Now" execution should be triggered, matching the logic used in the n8n automation workflow:
+
+### Execution Threshold
+Minimum allocation change (e.g., 5%) required to trigger an intraday Run Now. If the strategy's holdings would not change by at least this percentage, the execution is skipped. This matches the n8n workflow's skip rule to avoid unnecessary rebalances for trivial allocation shifts. Configurable in Settings.
+
+### Take-Profit Filter
+Only execute Run Now on days where the portfolio is up at least X% since the previous close. This prevents triggering rebalances on down days where the strategy might be better served by holding through.
+
+Available thresholds: Off (disabled), 0.5%, 1%, 2%, 3%, and negative thresholds for loss-triggered execution.
 
 ## Scoring System
 
