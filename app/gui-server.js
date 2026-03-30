@@ -428,7 +428,7 @@ function buildReportHTML(r, mode) {
 
   // EOD baseline
   body += '<div class="section">';
-  var eodSource = eodTime === '16:00' ? 'Yahoo daily close' : 'Alpaca ' + esc(eodTime) + ' bar';
+  var eodSource = eodTime === '16:00' ? 'Yahoo daily close' : eodTime === '16:00a' ? 'Alpaca bar close' : 'Alpaca ' + esc(eodTime) + ' bar open';
   var blLabel = r.baselineSource === 'composer' ? 'Baseline (Composer Backtest / Xignite)' : 'Baseline (' + eodSource + ')';
   body += '<div class="section-title">' + blLabel + '</div>';
   var cumFmt = ' (' + pct(r.eod.cumReturn, 1) + ' cum.)';
@@ -1000,8 +1000,8 @@ async function handleRequest(req, res) {
       // Validate EOD time against current timeframe: 15-min only allows 15:45/16:00
       const effectiveTimeframe = body.alpacaTimeframe || analyzer.CONFIG.ALPACA_TIMEFRAME;
       const validEodTimes = effectiveTimeframe === '5Min'
-        ? ['15:45', '15:50', '15:55', '16:00']
-        : ['15:45', '16:00'];
+        ? ['15:45', '15:50', '15:55', '16:00', '16:00a']
+        : ['15:45', '16:00', '16:00a'];
       if (body.eodTime && validEodTimes.includes(body.eodTime)) {
         analyzer.CONFIG.EOD_TIME = body.eodTime;
         guiUpdates.eodTime = body.eodTime;
@@ -1623,7 +1623,7 @@ function updateConfigUI() {
   status.innerHTML = [
     '<div class="row"><span class="status-dot ' + (config.hasAlpacaKeys ? 'green' : 'red') + '"></span> Alpaca: ' + (config.hasAlpacaKeys ? 'Connected' : 'Not configured') + '</div>',
     '<div class="row"><span class="status-dot ' + (config.hasComposerKeys ? 'green' : 'red') + '"></span> Composer: ' + (config.hasComposerKeys ? 'Connected' : 'Not configured') + '</div>',
-    '<div class="row">Bars: ' + (config.alpacaTimeframe || '15Min') + ' | EOD: ' + (config.baselineSource === 'composer' ? 'Composer Backtest' : (config.eodTime || '15:45') + ' (Yahoo)') + ' | Times: ' + testTimesCount + '</div>',
+    '<div class="row">Bars: ' + (config.alpacaTimeframe || '15Min') + ' | EOD: ' + (config.baselineSource === 'composer' ? 'Composer Backtest' : (config.eodTime || '15:45') + (config.eodTime === '16:00a' ? ' (Alpaca)' : config.eodTime === '16:00' ? ' (Yahoo)' : ' (Alpaca)')) + ' | Times: ' + testTimesCount + '</div>',
   ].join('');
 
   // Settings modal - General tab
@@ -2458,7 +2458,7 @@ function renderDetailCard(r, mode) {
   html += '<div style="margin-bottom:8px;font-size:13px">';
   var eodAnnGui = r.eod.annReturn != null ? r.eod.annReturn : annualizeGui(r.eod.cumReturn, r.tradingDays);
   var cumFmtGui = ' (' + fmtPct(r.eod.cumReturn, 1) + ' cum.)';
-  var blLabel2 = r.baselineSource === 'composer' ? 'Baseline (Composer Backtest):' : 'Baseline (EOD ' + eodTime + '):';
+  var blLabel2 = r.baselineSource === 'composer' ? 'Baseline (Composer Backtest / Xignite):' : 'Baseline (' + (eodTime === '16:00' ? 'Yahoo close' : eodTime === '16:00a' ? 'Alpaca close' : 'Alpaca ' + eodTime + ' open') + '):';
   html += '<strong>' + blLabel2 + '</strong> Return: ';
   html += '<span class="' + valClass(r.eod.cumReturn) + '">' + fmtPct(eodAnnGui, 1) + ' ann.' + cumFmtGui + '</span>';
   html += ' | Max DD: <span class="neg">' + r.eod.maxDD.toFixed(1) + '%</span>';
@@ -2538,7 +2538,7 @@ function renderCombinedDetailCard(r) {
   html += '<div style="margin-bottom:8px;font-size:13px">';
   var eodAnnGui2 = r.eod.annReturn != null ? r.eod.annReturn : annualizeGui2(r.eod.cumReturn, r.tradingDays);
   var cumFmtGui2 = ' (' + fmtPct(r.eod.cumReturn, 1) + ' cum.)';
-  var blLabel2 = r.baselineSource === 'composer' ? 'Baseline (Composer Backtest):' : 'Baseline (EOD ' + eodTime + '):';
+  var blLabel2 = r.baselineSource === 'composer' ? 'Baseline (Composer Backtest / Xignite):' : 'Baseline (' + (eodTime === '16:00' ? 'Yahoo close' : eodTime === '16:00a' ? 'Alpaca close' : 'Alpaca ' + eodTime + ' open') + '):';
   html += '<strong>' + blLabel2 + '</strong> Return: ';
   html += '<span class="' + valClass(r.eod.cumReturn) + '">' + fmtPct(eodAnnGui2, 1) + ' ann.' + cumFmtGui2 + '</span>';
   html += ' | Max DD: <span class="neg">' + r.eod.maxDD.toFixed(1) + '%</span>';
@@ -2849,16 +2849,18 @@ function buildEodOptions() {
 
   // 15-min mode: only 15:45 and 16:00 produce different prices
   // 5-min mode: all four options are meaningful
+  // 16:00a = Alpaca bar close (same source as intraday data)
   var options = timeframe === '5Min'
-    ? ['15:45', '15:50', '15:55', '16:00']
-    : ['15:45', '16:00'];
+    ? ['15:45', '15:50', '15:55', '16:00', '16:00a']
+    : ['15:45', '16:00', '16:00a'];
 
   eodSelect.innerHTML = '';
   var eodLabels = {
-    '15:45': '15:45 — Alpaca bar (Composer starts executing)',
-    '15:50': '15:50 — Alpaca bar (mid-execution window)',
-    '15:55': '15:55 — Alpaca bar (near end of window)',
-    '16:00': '16:00 — Yahoo daily close (official market close)'
+    '15:45': '15:45 — Alpaca bar open (Composer starts executing)',
+    '15:50': '15:50 — Alpaca bar open (mid-execution window)',
+    '15:55': '15:55 — Alpaca bar open (near end of window)',
+    '16:00': '16:00 — Yahoo daily close (official market close)',
+    '16:00a': '16:00 — Alpaca bar close (Alpaca market close)'
   };
   options.forEach(function(t) {
     var opt = document.createElement('option');

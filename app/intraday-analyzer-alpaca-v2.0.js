@@ -39,7 +39,7 @@ const CONFIG_FILE_LEGACY = path.join(APP_DIR, 'analyzer-config.json');
 const CONFIG = {
   TEST_TIMES: ['09:30', '09:35', '09:45', '10:00', '10:30', '11:00', '12:00', '13:00', '13:45'],
   EOD_TIME: '16:00',
-  EOD_TIME_OPTIONS: ['15:45', '15:50', '15:55', '16:00'],
+  EOD_TIME_OPTIONS: ['15:45', '15:50', '15:55', '16:00', '16:00a'],
   INTRADAY_INTERVAL: '5m',       // 5-minute bars for Yahoo
   ALPACA_TIMEFRAME: '15Min',     // Default: 15Min (fast). Use --5min for 5Min (precise)
   BACKTEST_API: 'https://backtest-api.composer.trade/api/v1',
@@ -1524,10 +1524,31 @@ function getSplitAdjustment(ticker, date, intradayData, dailyData) {
 }
 
 function getIntradayPrice(ticker, intradayData, date, time, dailyData = null) {
-  // Special case: 16:00 uses daily close (official market close)
+  // Special case: 16:00 uses Yahoo daily close (official market close)
   if (time === '16:00' && dailyData) {
     const dailyClose = dailyData[ticker]?.byDate?.[date]?.close;
     if (dailyClose) return dailyClose;
+  }
+
+  // Special case: 16:00a uses Alpaca's last intraday bar CLOSE as the market close.
+  // The close of the 15:45 bar (in 15-min mode) IS the ~16:00 price.
+  // This provides a same-source alternative to Yahoo daily close for comparison.
+  if (time === '16:00a') {
+    const dd = intradayData[ticker]?.byDT?.[date];
+    if (dd) {
+      const times = Object.keys(dd).sort();
+      // Find last bar and use its close
+      for (let i = times.length - 1; i >= 0; i--) {
+        const barClose = dd[times[i]]?.close;
+        if (barClose) return barClose;
+      }
+    }
+    // Fallback to daily close if no intraday data
+    if (dailyData) {
+      const dailyClose = dailyData[ticker]?.byDate?.[date]?.close;
+      if (dailyClose) return dailyClose;
+    }
+    return null;
   }
 
   const dd = intradayData[ticker]?.byDT?.[date];
@@ -7378,10 +7399,11 @@ ${'─'.repeat(70)}
           console.log('  Options:');
           eodOptions.forEach((t, i) => {
             const current = t === CONFIG.EOD_TIME ? ' ◀ CURRENT' : '';
-            const desc = t === '15:45' ? '(Alpaca 15:45 bar — Composer starts executing)' :
-                        t === '15:50' ? '(Alpaca 15:50 bar — mid-execution window)' :
-                        t === '15:55' ? '(Alpaca 15:55 bar — near end of window)' :
-                        t === '16:00' ? '(Yahoo daily close — official market close)' : '';
+            const desc = t === '15:45' ? '(Alpaca 15:45 bar open — Composer starts executing)' :
+                        t === '15:50' ? '(Alpaca 15:50 bar open — mid-execution window)' :
+                        t === '15:55' ? '(Alpaca 15:55 bar open — near end of window)' :
+                        t === '16:00' ? '(Yahoo daily close — official market close)' :
+                        t === '16:00a' ? '(Alpaca bar close — Alpaca market close)' : '';
             console.log(`    ${i + 1}. ${t} ${desc}${current}`);
           });
           console.log('');
