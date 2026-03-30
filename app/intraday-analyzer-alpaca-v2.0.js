@@ -4194,82 +4194,79 @@ function computeHoldingsReliability(score, dailyData, intradayData, composerHold
   const ourDatesSet = new Set(tradingDays);
   const commonDates = composerDates.filter(d => ourDatesSet.has(d));
   const sampleDates = commonDates.filter((d, i) => i % 5 === 0 || i >= commonDates.length - 5);
-  // Always include last 5 days for recency
 
   if (sampleDates.length < 3) return null;
 
-  let totalOverlap = 0;
-  let totalExactMatch = 0;
-  let totalWeightedOverlap = 0;
-  const perDay = [];
+  // Compare both Yahoo (16:00) and Alpaca (16:00a) against Composer
+  function computeOverlapStats(evalTime) {
+    let totalOverlap = 0, totalExactMatch = 0, totalWeightedOverlap = 0;
+    const perDay = [];
 
-  for (const date of sampleDates) {
-    const composerH = composerHoldings.holdingsByDate[date];
-    if (!composerH || composerH.length === 0) continue;
+    for (const date of sampleDates) {
+      const composerH = composerHoldings.holdingsByDate[date];
+      if (!composerH || composerH.length === 0) continue;
 
-    // Our holdings at 16:00 (Yahoo daily close — most internally consistent)
-    const ourH = getAssetsWithWeights(score, dailyData, intradayData, date, '16:00');
-    const ourFiltered = ourH.filter(h => h.weight > 0.001);
+      const ourH = getAssetsWithWeights(score, dailyData, intradayData, date, evalTime);
+      const ourFiltered = ourH.filter(h => h.weight > 0.001);
 
-    // Compute ticker overlap (Jaccard)
-    const composerSet = new Set(composerH.map(h => h.ticker));
-    const ourSet = new Set(ourFiltered.map(h => h.ticker));
-    const intersection = [...composerSet].filter(t => ourSet.has(t)).length;
-    const union = new Set([...composerSet, ...ourSet]).size;
-    const jaccard = union > 0 ? intersection / union : 0;
+      const composerSet = new Set(composerH.map(h => h.ticker));
+      const ourSet = new Set(ourFiltered.map(h => h.ticker));
+      const intersection = [...composerSet].filter(t => ourSet.has(t)).length;
+      const union = new Set([...composerSet, ...ourSet]).size;
+      const jaccard = union > 0 ? intersection / union : 0;
 
-    // Compute weight-adjusted overlap (sum of min weights for shared tickers)
-    const composerWeights = {};
-    const totalCW = composerH.reduce((s, h) => s + h.weight, 0);
-    for (const h of composerH) composerWeights[h.ticker] = h.weight / (totalCW || 1);
-    const ourWeights = {};
-    for (const h of ourFiltered) ourWeights[h.ticker] = h.weight;
+      const composerWeights = {};
+      const totalCW = composerH.reduce((s, h) => s + h.weight, 0);
+      for (const h of composerH) composerWeights[h.ticker] = h.weight / (totalCW || 1);
+      const ourWeights = {};
+      for (const h of ourFiltered) ourWeights[h.ticker] = h.weight;
 
-    let weightOverlap = 0;
-    for (const t of [...composerSet]) {
-      if (ourSet.has(t)) {
-        weightOverlap += Math.min(composerWeights[t] || 0, ourWeights[t] || 0);
+      let weightOverlap = 0;
+      for (const t of [...composerSet]) {
+        if (ourSet.has(t)) {
+          weightOverlap += Math.min(composerWeights[t] || 0, ourWeights[t] || 0);
+        }
       }
+
+      const exactMatch = jaccard === 1.0 &&
+        ourFiltered.map(h => h.ticker + ':' + (h.weight * 100).toFixed(0)).sort().join(',') ===
+        composerH.map(h => h.ticker + ':' + ((h.weight / (totalCW || 1)) * 100).toFixed(0)).sort().join(',');
+
+      totalOverlap += jaccard;
+      totalWeightedOverlap += weightOverlap;
+      if (exactMatch) totalExactMatch++;
+      perDay.push({ date, jaccard, weightOverlap, exactMatch, composerTickers: composerSet.size, ourTickers: ourSet.size });
     }
 
-    const exactMatch = jaccard === 1.0 &&
-      ourFiltered.map(h => h.ticker + ':' + (h.weight * 100).toFixed(0)).sort().join(',') ===
-      composerH.map(h => h.ticker + ':' + ((h.weight / (totalCW || 1)) * 100).toFixed(0)).sort().join(',');
+    const n = perDay.length;
+    if (n === 0) return null;
 
-    totalOverlap += jaccard;
-    totalWeightedOverlap += weightOverlap;
-    if (exactMatch) totalExactMatch++;
-    perDay.push({ date, jaccard, weightOverlap, exactMatch, composerTickers: composerSet.size, ourTickers: ourSet.size });
+    const avgOverlap = totalOverlap / n;
+    const avgWeightedOverlap = totalWeightedOverlap / n;
+    const exactMatchRate = totalExactMatch / n;
+    const reliabilityScore = Math.round(avgOverlap * 50 + avgWeightedOverlap * 30 + exactMatchRate * 20);
+
+    let verdict;
+    if (reliabilityScore >= 80) verdict = 'HIGH';
+    else if (reliabilityScore >= 50) verdict = 'MODERATE';
+    else if (reliabilityScore >= 25) verdict = 'LOW';
+    else verdict = 'UNRELIABLE';
+
+    return { score: reliabilityScore, verdict, avgTickerOverlap: avgOverlap, avgWeightOverlap: avgWeightedOverlap, exactMatchRate, daysChecked: n, perDay: perDay.slice(-5) };
   }
 
-  const n = perDay.length;
-  if (n === 0) return null;
+  const yahoo = computeOverlapStats('16:00');    // Yahoo daily close
+  const alpaca = computeOverlapStats('16:00a');  // Alpaca bar close
 
-  const avgOverlap = totalOverlap / n;
-  const avgWeightedOverlap = totalWeightedOverlap / n;
-  const exactMatchRate = totalExactMatch / n;
-
-  // Composite reliability score (0-100)
-  // 50% ticker overlap + 30% weight overlap + 20% exact match rate
-  const reliabilityScore = Math.round(
-    avgOverlap * 50 + avgWeightedOverlap * 30 + exactMatchRate * 20
-  );
-
-  // Classify
-  let verdict;
-  if (reliabilityScore >= 80) verdict = 'HIGH';
-  else if (reliabilityScore >= 50) verdict = 'MODERATE';
-  else if (reliabilityScore >= 25) verdict = 'LOW';
-  else verdict = 'UNRELIABLE';
+  // Use the better of the two as the primary score, but report both
+  const primary = (alpaca && yahoo) ? (alpaca.score >= yahoo.score ? alpaca : yahoo) : (yahoo || alpaca);
+  if (!primary) return null;
 
   return {
-    score: reliabilityScore,
-    verdict,
-    avgTickerOverlap: avgOverlap,
-    avgWeightOverlap: avgWeightedOverlap,
-    exactMatchRate,
-    daysChecked: n,
-    perDay: perDay.slice(-5) // last 5 for display
+    ...primary,
+    yahoo: yahoo ? { score: yahoo.score, verdict: yahoo.verdict, avgTickerOverlap: yahoo.avgTickerOverlap, exactMatchRate: yahoo.exactMatchRate } : null,
+    alpaca: alpaca ? { score: alpaca.score, verdict: alpaca.verdict, avgTickerOverlap: alpaca.avgTickerOverlap, exactMatchRate: alpaca.exactMatchRate } : null,
+    bestSource: (alpaca && yahoo) ? (alpaca.score >= yahoo.score ? 'alpaca' : 'yahoo') : (yahoo ? 'yahoo' : 'alpaca')
   };
 }
 
@@ -5208,7 +5205,10 @@ async function dualTimeAnalysis(ids, intradayDays, quiet = false) {
         if (holdingsReliability && !quiet) {
           const hr = holdingsReliability;
           const color = hr.verdict === 'HIGH' ? '\x1b[32m' : hr.verdict === 'MODERATE' ? '\x1b[33m' : '\x1b[31m';
-          console.log(`  Holdings reliability: ${color}${hr.score}/100 ${hr.verdict}\x1b[0m (${(hr.avgTickerOverlap*100).toFixed(0)}% ticker overlap, ${(hr.exactMatchRate*100).toFixed(0)}% exact match across ${hr.daysChecked} days)`);
+          console.log(`  Holdings reliability: ${color}${hr.score}/100 ${hr.verdict}\x1b[0m (${hr.daysChecked} days checked)`);
+          if (hr.yahoo) console.log(`    Yahoo vs Composer:  ${hr.yahoo.score}/100 ${hr.yahoo.verdict} (${(hr.yahoo.avgTickerOverlap*100).toFixed(0)}% overlap, ${(hr.yahoo.exactMatchRate*100).toFixed(0)}% exact)`);
+          if (hr.alpaca) console.log(`    Alpaca vs Composer: ${hr.alpaca.score}/100 ${hr.alpaca.verdict} (${(hr.alpaca.avgTickerOverlap*100).toFixed(0)}% overlap, ${(hr.alpaca.exactMatchRate*100).toFixed(0)}% exact)`);
+          if (hr.bestSource) console.log(`    Best source: ${hr.bestSource}`);
         }
       }
 

@@ -496,7 +496,11 @@ function buildReportHTML(r, mode) {
       body += '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#8b949e;margin-bottom:4px">Holdings Reliability vs Composer</div>';
       body += '<span style="font-size:20px;font-weight:700;color:' + hrColor + '">' + hr.score + '/100 ' + hr.verdict + '</span>';
       body += '<div style="margin-top:4px;font-size:12px;color:#8b949e">';
-      body += 'Ticker overlap: ' + (hr.avgTickerOverlap * 100).toFixed(0) + '% &middot; Weight overlap: ' + (hr.avgWeightOverlap * 100).toFixed(0) + '% &middot; Exact match: ' + (hr.exactMatchRate * 100).toFixed(0) + '% &middot; ' + hr.daysChecked + ' days checked';
+      if (hr.yahoo) body += '<span style="color:#d29922">Yahoo</span> vs Composer: ' + hr.yahoo.score + '/100 (' + (hr.yahoo.avgTickerOverlap * 100).toFixed(0) + '% overlap, ' + (hr.yahoo.exactMatchRate * 100).toFixed(0) + '% exact)';
+      if (hr.yahoo && hr.alpaca) body += ' &nbsp;|&nbsp; ';
+      if (hr.alpaca) body += '<span style="color:#58a6ff">Alpaca</span> vs Composer: ' + hr.alpaca.score + '/100 (' + (hr.alpaca.avgTickerOverlap * 100).toFixed(0) + '% overlap, ' + (hr.alpaca.exactMatchRate * 100).toFixed(0) + '% exact)';
+      body += ' &nbsp;|&nbsp; ' + hr.daysChecked + ' days checked';
+      if (hr.bestSource) body += ' &nbsp;|&nbsp; Best: <strong>' + hr.bestSource + '</strong>';
       body += '</div>';
       if (hr.verdict === 'LOW' || hr.verdict === 'UNRELIABLE') {
         body += '<div style="margin-top:6px;font-size:11px;color:' + hrColor + '">&#9888; Yahoo/Alpaca holdings diverge significantly from Composer. Intraday results may not be reliable for this strategy.</div>';
@@ -2655,6 +2659,26 @@ function renderCombinedDetailCard(r) {
   var bi2 = cands2.length > 0 ? cands2[0].imp : 0;
   var br2 = cands2.length > 0 ? cands2[0].rel : 0;
   var bt2 = cands2.length > 0 ? cands2[0].time : '';
+
+  // Holdings reliability badge (live GUI)
+  var hrLive = r.dual?.holdingsReliability || r.holdingsReliability;
+  if (hrLive) {
+    var hrLC = hrLive.verdict === 'HIGH' ? 'var(--green,#3fb950)' : hrLive.verdict === 'MODERATE' ? 'var(--yellow,#d29922)' : 'var(--red,#f85149)';
+    html += '<div style="padding:10px 14px;border-radius:6px;background:rgba(128,128,128,0.08);border:1px solid rgba(128,128,128,0.2);margin-bottom:12px">';
+    html += '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text2);margin-bottom:4px">Holdings Reliability vs Composer</div>';
+    html += '<span style="font-size:18px;font-weight:700;color:' + hrLC + '">' + hrLive.score + '/100 ' + hrLive.verdict + '</span>';
+    html += '<div style="margin-top:4px;font-size:11px;color:var(--text2)">';
+    if (hrLive.yahoo) html += '<span style="color:var(--yellow,#d29922)">Yahoo</span>: ' + hrLive.yahoo.score + '/100 (' + (hrLive.yahoo.avgTickerOverlap * 100).toFixed(0) + '% overlap)';
+    if (hrLive.yahoo && hrLive.alpaca) html += ' | ';
+    if (hrLive.alpaca) html += '<span style="color:var(--accent,#58a6ff)">Alpaca</span>: ' + hrLive.alpaca.score + '/100 (' + (hrLive.alpaca.avgTickerOverlap * 100).toFixed(0) + '% overlap)';
+    html += ' | ' + hrLive.daysChecked + ' days';
+    if (hrLive.bestSource) html += ' | Best: <strong>' + hrLive.bestSource + '</strong>';
+    html += '</div>';
+    if (hrLive.verdict === 'LOW' || hrLive.verdict === 'UNRELIABLE') {
+      html += '<div style="margin-top:4px;font-size:11px;color:' + hrLC + '">\\u26A0 Holdings diverge significantly from Composer. Intraday results may not be reliable.</div>';
+    }
+    html += '</div>';
+  }
 
   if (!bm2) {
     // NOT RECOMMENDED — show prominently, skip score boxes
