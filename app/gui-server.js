@@ -2541,7 +2541,7 @@ function renderCombinedDetailCard(r) {
       if (!csData) return '';
       var q = getQL2(csData.total);
       var selStyle = isBest ? 'outline:2px solid #58a6ff;outline-offset:-2px;' : 'opacity:0.7;';
-      return '<div class="mode-card" data-mode="' + modeId + '" onclick="switchModeTab(\'' + modeId + '\')" '
+      return '<div class="mode-card" data-mode="' + modeId + '" onclick="switchModeTab(\\\'' + modeId + '\\\')" '
         + 'style="flex:1;min-width:180px;padding:10px 12px;border-radius:6px;background:' + q.bgColor + ';border:1px solid ' + q.borderColor + ';line-height:1.6;cursor:pointer;transition:all 0.15s;' + selStyle + '">'
         + '<div style="font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:0.5px;color:var(--text2,#8b949e)">' + label + ' @ ' + timeStr + '</div>'
         + '<span style="font-size:20px;font-weight:700;color:' + q.htmlColor + '">' + q.label + ' ' + csData.total + '</span><span style="font-size:12px;opacity:0.6">/100</span>'
