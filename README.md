@@ -36,7 +36,7 @@ node app/gui-server.js
 # Or on Windows: double-click "Intraday Analyzer.bat"
 
 # 3. Open browser
-# http://localhost:3000
+# http://localhost:3100
 ```
 
 On first launch, the Settings page will prompt you for API keys.
@@ -148,7 +148,7 @@ Runs all three modes and recommends the best approach considering return improve
 For each strategy, the analyzer:
 
 1. **Fetches the strategy's ticker allocation** from Composer's public API
-2. **Downloads intraday price data** for all tickers (5-min or 15-min bars from Alpaca)
+2. **Downloads intraday price data** for all tickers (1-min, 5-min, or 15-min bars from Alpaca)
 3. **Re-evaluates the strategy's conditions** at each candidate time using prices available at that moment
 4. **Simulates execution** — enters positions at the candidate time's prices instead of end-of-day
 5. **Scores each time** on 3 base axes: return improvement (with absolute floor for negative improvements), drawdown quality, and neighbor robustness

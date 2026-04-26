@@ -4378,9 +4378,11 @@ function computeHoldingsReliability(score, dailyData, intradayData, composerHold
     const reliabilityScore = Math.round(avgOverlap * 50 + avgWeightedOverlap * 30 + exactMatchRate * 20);
 
     let verdict;
-    if (reliabilityScore >= 80) verdict = 'HIGH';
-    else if (reliabilityScore >= 50) verdict = 'MODERATE';
-    else if (reliabilityScore >= 25) verdict = 'LOW';
+    // Bands match the documented thresholds in README.md:
+    // HIGH 90+, MODERATE 70-89, LOW 50-69, UNRELIABLE <50.
+    if (reliabilityScore >= 90) verdict = 'HIGH';
+    else if (reliabilityScore >= 70) verdict = 'MODERATE';
+    else if (reliabilityScore >= 50) verdict = 'LOW';
     else verdict = 'UNRELIABLE';
 
     return { score: reliabilityScore, verdict, avgTickerOverlap: avgOverlap, avgWeightOverlap: avgWeightedOverlap, exactMatchRate, daysChecked: n, perDay: perDay.slice(-10) };
