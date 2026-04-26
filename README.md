@@ -18,9 +18,9 @@ Find the best time of day to execute your [Composer.trade](https://www.composer.
 - **Unified tab interface** — Click any candidate time to see both Robustness Check and Walk-Forward Test results side-by-side
 - **Web GUI** — Browser-based dashboard with interactive results and HTML report export
 - **Full CLI** — Scriptable command-line interface for automation and batch analysis
-- **Alpaca data** — Up to 2 years of 5-minute or 15-minute intraday bars via free Alpaca paper account
+- **Alpaca data** — Up to ~3 years of 1-minute, 5-minute, or 15-minute intraday bars via free Alpaca paper account
 - **Data source resilience** — Missing Alpaca day fallback for all times, early-close day handling, and multiple EOD data source options including Alpaca bar close
-- **Composer API integration** — Browse and select strategies directly from your portfolio/watchlist
+- **Composer API integration** — Browse and select strategies directly from your portfolio/watchlist (across all linked accounts: taxable + Roth IRA + traditional IRA)
 - **Zero dependencies** — Pure Node.js, no npm install required
 
 ## Quick Start

@@ -5,6 +5,10 @@ dist/
 .DS_Store
 analyzer-config.json
 analyzer-config.enc
+analyzer-config.enc.*
+*.bak
+.env
+.env.*
 gui-settings.json
 cache/
 reports/

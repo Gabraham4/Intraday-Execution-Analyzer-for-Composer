@@ -41,14 +41,14 @@ const CONFIG = {
   EOD_TIME: '16:00',
   EOD_TIME_OPTIONS: ['15:45', '15:50', '15:55', '16:00', '16:00a'],
   INTRADAY_INTERVAL: '5m',       // 5-minute bars for Yahoo
-  ALPACA_TIMEFRAME: '15Min',     // Default: 15Min (fast). Use --5min for 5Min (precise)
+  ALPACA_TIMEFRAME: '15Min',     // Default: 15Min (fast). Use --5min for 5Min, --1min for 1Min (max precision)
   BACKTEST_API: 'https://backtest-api.composer.trade/api/v1',
   FIRESTORE_BASE: 'https://firestore.googleapis.com/v1/projects/leverheads-278521/databases/(default)/documents/symphony',
   ALPACA_DATA_API: 'https://data.alpaca.markets/v2',
-  MAX_INTRADAY_DAYS_ALPACA: 730,  // 2 years of 5-min data via Alpaca
+  MAX_INTRADAY_DAYS_ALPACA: 1100, // ~3 years of intraday data via Alpaca (5yr rolling cap, 2016 floor)
   MAX_INTRADAY_DAYS_YAHOO: 59,    // Yahoo limit
   MAX_INTRADAY_DAYS: 59,          // Set dynamically based on data source
-  MAX_DAILY_DAYS: 730,            // 2 years needed for Wilder RSI to stabilize properly
+  MAX_DAILY_DAYS: 1600,           // ~6.4 years: intraday window (up to 1100 days) + Wilder RSI warmup (~500 days)
   alpaca: null,                   // Loaded from config file at startup
   composer: null,                 // Loaded from config file at startup
   dataSource: 'hybrid',           // 'hybrid' (Alpaca intraday + Yahoo daily) | 'alpaca' | 'yahoo' | 'auto'
@@ -136,9 +136,9 @@ function loadConfigFromFile() {
 function loadConfig() {
   const fileConfig = loadConfigFromFile();
 
-  // Priority: env vars > config file
-  const apiKey = process.env.ALPACA_API_KEY || fileConfig.alpacaApiKey || null;
-  const apiSecret = process.env.ALPACA_API_SECRET || fileConfig.alpacaApiSecret || null;
+  // Priority: env vars > new field name > legacy field name (pre-rename migration)
+  const apiKey = process.env.ALPACA_API_KEY || fileConfig.alpacaApiKey || fileConfig.apiKey || null;
+  const apiSecret = process.env.ALPACA_API_SECRET || fileConfig.alpacaApiSecret || fileConfig.apiSecret || null;
   const dataSource = process.env.DATA_SOURCE || fileConfig.dataSource || 'hybrid';
   const composerKeyId = process.env.COMPOSER_KEY_ID || fileConfig.composerKeyId || null;
   const composerSecret = process.env.COMPOSER_SECRET || fileConfig.composerSecret || null;
@@ -191,6 +191,10 @@ function hasComposerKeys() {
   // --5min flag: use 5-minute bars for maximum precision (3x slower)
   if (process.argv.includes('--5min')) {
     CONFIG.ALPACA_TIMEFRAME = '5Min';
+  }
+  // --1min flag: use 1-minute bars for minute-level precision (15x slower than 15Min)
+  if (process.argv.includes('--1min')) {
+    CONFIG.ALPACA_TIMEFRAME = '1Min';
   }
 })();
 
@@ -682,12 +686,39 @@ async function getSymphony(id) {
   throw new Error(`Symphony ${id} not found (public API returned 404, no Composer keys for authenticated access)`);
 }
 
+function loadLocalSymphony(filePath) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Local symphony file not found: ${filePath}`);
+  }
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch (e) {
+    throw new Error(`Failed to parse local symphony JSON at ${filePath}: ${e.message}`);
+  }
+  if (!raw || raw.step !== 'root') {
+    throw new Error(`Local symphony at ${filePath} is missing root node (expected step:"root")`);
+  }
+  normalizeScoreTreeTickers(raw);
+  // Mirror getSymphony's rebalanceConfig inference: root node carries
+  // `rebalance` and optionally `rebalance-corridor-width`.
+  const rebalanceConfig =
+    raw.rebalance === 'none' && raw['rebalance-corridor-width']
+      ? { type: 'threshold', threshold: raw['rebalance-corridor-width'] }
+      : { type: 'daily', threshold: null };
+  return {
+    score: raw,
+    name: raw.name || path.basename(filePath, path.extname(filePath)),
+    rebalanceConfig,
+  };
+}
+
 // ============================================================================
 // COMPOSER PORTFOLIO/WATCHLIST API
 // ============================================================================
 
 // Session cache so we don't re-fetch on every menu interaction
-const _composerCache = { portfolio: null, watchlist: null, drafts: null, accountUUID: null };
+const _composerCache = { portfolio: null, watchlist: null, drafts: null, accountUUID: null, accounts: null, symphonyToAccount: null };
 
 function composerAuthRequest(url) {
   return new Promise((resolve, reject) => {
@@ -718,16 +749,49 @@ function composerAuthRequest(url) {
 async function getComposerPortfolio() {
   if (_composerCache.portfolio) return _composerCache.portfolio;
 
-  const uuid = await getAccountUUID();
-  const portfolioData = await composerAuthRequest(
-    `https://api.composer.trade/api/v0.1/portfolio/accounts/${uuid}/symphony-stats-meta`
-  );
-  const symphonies = portfolioData.symphonies || [];
-  _composerCache.portfolio = symphonies.map(s => ({
-    id: s.id || s.symphony_id,
-    name: s.name || 'Unnamed',
-    value: s.value != null ? parseFloat(s.value) : null,
-  }));
+  const accounts = await getAllAccounts();
+  const merged = [];
+  const seen = new Map(); // id → index in merged (for dedupe across accounts)
+  const symToAcct = {};   // id → {uuid, type} (for live-holdings routing)
+
+  for (const acct of accounts) {
+    let portfolioData;
+    try {
+      portfolioData = await composerAuthRequest(
+        `https://api.composer.trade/api/v0.1/portfolio/accounts/${acct.uuid}/symphony-stats-meta`
+      );
+    } catch (e) {
+      console.warn(`  Warning: failed to fetch portfolio for ${acct.type} (${acct.uuid.slice(0,8)}): ${e.message}`);
+      continue;
+    }
+    const symphonies = portfolioData.symphonies || [];
+    for (const s of symphonies) {
+      const id = s.id || s.symphony_id;
+      if (!id) continue;
+      const value = s.value != null ? parseFloat(s.value) : null;
+      if (seen.has(id)) {
+        // Same symphony deployed in both accounts — sum values, append account types
+        const idx = seen.get(id);
+        if (value != null) merged[idx].value = (merged[idx].value || 0) + value;
+        if (!merged[idx].accountType.includes(acct.type)) {
+          merged[idx].accountType += ' + ' + acct.type;
+        }
+      } else {
+        seen.set(id, merged.length);
+        merged.push({
+          id,
+          name: s.name || 'Unnamed',
+          value,
+          accountType: acct.type,
+          accountUuid: acct.uuid,
+        });
+        symToAcct[id] = { uuid: acct.uuid, type: acct.type };
+      }
+    }
+  }
+
+  _composerCache.portfolio = merged;
+  _composerCache.symphonyToAccount = symToAcct;
   return _composerCache.portfolio;
 }
 
@@ -792,34 +856,86 @@ function composerAuthPost(url, body) {
   });
 }
 
-async function getAccountUUID() {
-  if (_composerCache.accountUUID) return _composerCache.accountUUID;
+async function getAllAccounts() {
+  if (_composerCache.accounts) return _composerCache.accounts;
   const accountsData = await composerAuthRequest('https://stagehand-api.composer.trade/api/v1/accounts/list');
-  const accounts = accountsData.accounts || accountsData;
-  if (!accounts || accounts.length === 0) throw new Error('No Composer accounts found');
-  _composerCache.accountUUID = accounts[0].account_uuid || accounts[0].uuid || accounts[0].id;
+  const raw = accountsData.accounts || accountsData;
+  if (!raw || raw.length === 0) throw new Error('No Composer accounts found');
+  _composerCache.accounts = raw.map(a => ({
+    uuid: a.account_uuid || a.uuid || a.id,
+    type: a.account_type || 'UNKNOWN',
+  })).filter(a => a.uuid);
+  return _composerCache.accounts;
+}
+
+async function getAccountUUID() {
+  // Backward-compat: returns first account's UUID. Prefer getAllAccounts() for multi-account flows.
+  if (_composerCache.accountUUID) return _composerCache.accountUUID;
+  const accounts = await getAllAccounts();
+  _composerCache.accountUUID = accounts[0].uuid;
   return _composerCache.accountUUID;
 }
 
+async function _findAccountForSymphony(symphonyId) {
+  // Use cached portfolio map if available, otherwise probe each account
+  if (_composerCache.symphonyToAccount && _composerCache.symphonyToAccount[symphonyId]) {
+    return _composerCache.symphonyToAccount[symphonyId].uuid;
+  }
+  // Force a portfolio fetch (which populates symphonyToAccount) before falling back
+  await getComposerPortfolio();
+  if (_composerCache.symphonyToAccount && _composerCache.symphonyToAccount[symphonyId]) {
+    return _composerCache.symphonyToAccount[symphonyId].uuid;
+  }
+  // Last resort — first account (matches old behavior)
+  return getAccountUUID();
+}
+
 async function getLiveSymphonyHoldings(symphonyId) {
-  const uuid = await getAccountUUID();
+  const uuid = await _findAccountForSymphony(symphonyId);
   return composerAuthRequest(
     `https://stagehand-api.composer.trade/api/v1/portfolio/accounts/${uuid}/symphonies/${symphonyId}/holdings`
   );
 }
 
 async function getPortfolioTotalStats() {
-  const uuid = await getAccountUUID();
-  return composerAuthRequest(
-    `https://stagehand-api.composer.trade/api/v1/portfolio/accounts/${uuid}/total-stats`
-  );
+  // Sum aggregable fields across all accounts (portfolio_value, total_cash, etc.)
+  const accounts = await getAllAccounts();
+  const merged = {};
+  const sumKeys = ['portfolio_value', 'total_cash', 'total_unallocated_cash', 'pending_deploys_cash', 'net_deposits'];
+  for (const acct of accounts) {
+    let stats;
+    try {
+      stats = await composerAuthRequest(
+        `https://stagehand-api.composer.trade/api/v1/portfolio/accounts/${acct.uuid}/total-stats`
+      );
+    } catch { continue; }
+    for (const k of sumKeys) {
+      const v = stats[k] != null ? parseFloat(stats[k]) : null;
+      if (v != null && !isNaN(v)) merged[k] = (merged[k] != null ? merged[k] : 0) + v;
+    }
+    // Pass-through non-summable fields from first account that has them
+    for (const k of Object.keys(stats)) {
+      if (!sumKeys.includes(k) && merged[k] === undefined) merged[k] = stats[k];
+    }
+  }
+  return merged;
 }
 
 async function getAllHoldingStats() {
-  const uuid = await getAccountUUID();
-  return composerAuthRequest(
-    `https://stagehand-api.composer.trade/api/v1/portfolio/accounts/${uuid}/holding-stats`
-  );
+  // Concatenate holding-stats arrays across all accounts
+  const accounts = await getAllAccounts();
+  const out = [];
+  for (const acct of accounts) {
+    let data;
+    try {
+      data = await composerAuthRequest(
+        `https://stagehand-api.composer.trade/api/v1/portfolio/accounts/${acct.uuid}/holding-stats`
+      );
+    } catch { continue; }
+    const arr = Array.isArray(data) ? data : (data.holdings || data.holding_stats || []);
+    for (const row of arr) out.push({ ...row, accountType: acct.type, accountUuid: acct.uuid });
+  }
+  return out;
 }
 
 async function getPublicQuotes(tickers) {
@@ -1585,13 +1701,24 @@ function getIntradayPrice(ticker, intradayData, date, time, dailyData = null) {
   //   - Early-close days (Christmas Eve, etc.) where bars stop at 10:15 or 13:00
   //     but we need a price at 14:00+ — the daily close is far more accurate
   //     than a hours-old intraday bar.
-  // For EOD times (>= 15:45), always fall back if bar doesn't match exactly.
-  // For earlier times, fall back if the gap exceeds 2 hours (early-close scenario).
+  // Fallback rule: gap-based, not clock-hour-based. The previous "time >= '15:45'"
+  // rule conflated "near EOD" with "no exact-bar match" and made minute-level
+  // late-day analysis impossible (any time past 15:45 collapsed to daily close
+  // when bestTime didn't equal time). Now: fall back only when no bar exists
+  // within the timeframe's natural resolution. With 1Min bars, asking for 15:53
+  // on a normal trading day finds the 15:53 bar and returns it; only on
+  // early-close days (no late bars at all) does the gap exceed threshold.
   if (bestTime !== time && dailyData) {
     const [bH, bM] = (bestTime || '00:00').split(':').map(Number);
     const [tH, tM] = time.split(':').map(Number);
     const gapMinutes = (tH * 60 + tM) - (bH * 60 + bM);
-    if (time >= '15:45' || gapMinutes > 120) {
+    // Per-timeframe staleness threshold: ~3x bar duration for normal-precision
+    // matching, with a hard 120-min ceiling for early-close detection.
+    const tfMinutes = CONFIG.ALPACA_TIMEFRAME === '1Min' ? 1
+                    : CONFIG.ALPACA_TIMEFRAME === '5Min' ? 5
+                    : 15;
+    const maxGap = Math.max(tfMinutes * 3, 30); // generous near-bar tolerance, 30-min minimum
+    if (gapMinutes > maxGap || gapMinutes > 120) {
       const dailyClose = dailyData[ticker]?.byDate?.[date]?.close;
       if (dailyClose) return dailyClose;
     }
@@ -7614,7 +7741,7 @@ ${'─'.repeat(70)}
   7. Change EOD Time        - Currently: ${CONFIG.EOD_TIME} ${CONFIG.EOD_TIME === '16:00' ? '(Market Close)' : '(Intraday)'}
   8. Configure API Keys     - ${hasAlpacaKeys() ? 'Alpaca ✓' : 'No Alpaca keys'} | ${hasComposerKeys() ? 'Composer ✓' : 'No Composer keys'}
   9. Debug Compare          - Compare Alpaca vs Yahoo data side-by-side
-  10. Intraday Bar Size      - Currently: ${CONFIG.ALPACA_TIMEFRAME} ${CONFIG.ALPACA_TIMEFRAME === '15Min' ? '(Fast)' : '(Precise)'}
+  10. Intraday Bar Size      - Currently: ${CONFIG.ALPACA_TIMEFRAME} ${CONFIG.ALPACA_TIMEFRAME === '15Min' ? '(Fast)' : CONFIG.ALPACA_TIMEFRAME === '5Min' ? '(Precise)' : '(Max precision)'}
 
 ${'─'.repeat(70)}
   q. Quit
@@ -7704,13 +7831,17 @@ ${'─'.repeat(70)}
           console.log('  ─────────────────────────────────────────────────────');
           console.log('  Composer executes trades between 3:45-4:00 PM ET.');
           // In 15-min mode, only 15:45 and 16:00 produce different prices
-          const eodOptions = CONFIG.ALPACA_TIMEFRAME === '5Min'
-            ? ['15:45', '15:50', '15:55', '16:00']
-            : ['15:45', '16:00'];
-          if (CONFIG.ALPACA_TIMEFRAME !== '5Min') {
-            console.log('  (Using 15-min bars — only 15:45 and 16:00 are distinct. Switch to 5-min for finer control.)\n');
+          const eodOptions = CONFIG.ALPACA_TIMEFRAME === '1Min'
+            ? ['15:44', '15:45', '15:50', '15:53', '15:55', '16:00']
+            : CONFIG.ALPACA_TIMEFRAME === '5Min'
+              ? ['15:45', '15:50', '15:55', '16:00']
+              : ['15:45', '16:00'];
+          if (CONFIG.ALPACA_TIMEFRAME === '15Min') {
+            console.log('  (Using 15-min bars — only 15:45 and 16:00 are distinct. Switch to 5-min/1-min for finer control.)\n');
+          } else if (CONFIG.ALPACA_TIMEFRAME === '5Min') {
+            console.log('  (Using 5-min bars — all listed options produce distinct prices.)\n');
           } else {
-            console.log('  (Using 5-min bars — all options produce distinct prices.)\n');
+            console.log('  (Using 1-min bars — minute-level precision available.)\n');
           }
           console.log('  Options:');
           eodOptions.forEach((t, i) => {
@@ -7762,7 +7893,8 @@ ${'─'.repeat(70)}
           console.log('  Controls the resolution of intraday price data.\n');
           const barOptions = [
             { tf: '15Min', label: '15-min bars (Fast)', desc: '3x fewer API calls, all test times except 09:35 are exact' },
-            { tf: '5Min',  label: '5-min bars (Precise)', desc: 'Maximum granularity, ~3x slower due to more API calls' },
+            { tf: '5Min',  label: '5-min bars (Precise)', desc: 'Maximum granularity for standard analysis, ~3x slower' },
+            { tf: '1Min',  label: '1-min bars (Max precision)', desc: 'Minute-level resolution, ~15x slower than 15-min, longer first-run fetch' },
           ];
           barOptions.forEach((opt, i) => {
             const current = opt.tf === CONFIG.ALPACA_TIMEFRAME ? ' ◀ CURRENT' : '';
@@ -7770,7 +7902,7 @@ ${'─'.repeat(70)}
             console.log(`       ${opt.desc}`);
           });
           console.log('');
-          const barChoice = await ask(r, '  Select [1-2]: ');
+          const barChoice = await ask(r, `  Select [1-${barOptions.length}]: `);
           const barIdx = parseInt(barChoice) - 1;
           if (barIdx >= 0 && barIdx < barOptions.length) {
             CONFIG.ALPACA_TIMEFRAME = barOptions[barIdx].tf;
@@ -8540,6 +8672,7 @@ Flags:
   --source=alpaca                            Force Alpaca for this run
   --source=yahoo                             Force Yahoo for this run
   --5min                                     Use 5-min bars (precise, 3x slower)
+  --1min                                     Use 1-min bars (max precision, ~15x slower)
   --debug-compare                            Compare Alpaca vs Yahoo data
   --ids=ID1,ID2                              Filter to specific strategy IDs
   --predict                                  Run tree-walk prediction (live-holdings)
@@ -8554,6 +8687,7 @@ Flags:
 Intraday Modes:
   Default: 15-min bars (fast, ~1 min for 150 tickers)
   --5min:  5-min bars  (precise, ~3 min for 150 tickers)
+  --1min:  1-min bars  (max precision, ~15 min for 150 tickers)
 `);
         break;
 
@@ -8573,6 +8707,7 @@ module.exports = {
   getComposerWatchlist,
   getComposerDrafts,
   getSymphony,
+  loadLocalSymphony,
   extractTickers,
   dualTimeAnalysis,
   singleTimeAnalysis,
@@ -8595,6 +8730,7 @@ module.exports = {
   normalizeQuoteTicker,
   getPortfolioTotalStats,
   getAllHoldingStats,
+  getAllAccounts,
   fetchAllData,
   getTradingDays,
   getTradingDaysFromDaily,

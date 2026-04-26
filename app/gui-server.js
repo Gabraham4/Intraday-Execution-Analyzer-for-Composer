@@ -1804,6 +1804,10 @@ function renderStrategies() {
     var checked = selectedIds.has(s.id) ? 'checked' : '';
     var val = '';
     var tag = s.manual ? '<span class="tag">Manual</span>' : '';
+    if (s.accountType) {
+      var shortType = s.accountType.replace(/INDIVIDUAL/g, 'IND').replace(/ROTH_IRA/g, 'ROTH').replace(/TRADITIONAL_IRA/g, 'IRA');
+      tag += '<span class="tag" title="' + escapeHtml(s.accountType) + '">' + escapeHtml(shortType) + '</span>';
+    }
     return '<div class="strategy-item" onclick="toggleStrategy(\\'' + s.id + '\\')">' +
       '<input type="checkbox" ' + checked + ' onclick="event.stopPropagation(); toggleStrategy(\\'' + s.id + '\\')">' +
       '<span class="name" title="' + escapeHtml(s.name) + '">' + escapeHtml(s.name) + '</span>' +
