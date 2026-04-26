@@ -3668,7 +3668,9 @@ function runComposerBaselineBacktest(composerHoldings, dailyData, intradayData, 
         }
       }
       if (totalWeight > 0) {
-        equity *= (1 + dayReturn);
+        // Re-normalize for missing tickers: apply the partial-weight return as full exposure.
+        // Without this, a day where one ticker has null data understates the day's return.
+        equity *= (1 + dayReturn / totalWeight);
       }
     }
 
@@ -3721,7 +3723,7 @@ function runDualTimeBacktest(score, dailyData, intradayData, tradingDays, mornin
         }
       }
       if (totalWeight > 0) {
-        equity *= (1 + overnightReturn);
+        equity *= (1 + overnightReturn / totalWeight);
       }
     }
 
@@ -3757,7 +3759,7 @@ function runDualTimeBacktest(score, dailyData, intradayData, tradingDays, mornin
         }
       }
       if (totalWeight > 0) {
-        equity *= (1 + intradayReturn);
+        equity *= (1 + intradayReturn / totalWeight);
       }
     }
 
@@ -3812,7 +3814,7 @@ function runEODOnlyBacktest(score, dailyData, intradayData, tradingDays, rebalan
         }
       }
       if (totalWeight > 0) {
-        equity *= (1 + dayReturn);
+        equity *= (1 + dayReturn / totalWeight);
       }
     }
 
@@ -3872,7 +3874,7 @@ function runSingleTimeBacktest(score, dailyData, intradayData, tradingDays, trad
         }
       }
       if (totalWeight > 0) {
-        equity *= (1 + dayReturn);
+        equity *= (1 + dayReturn / totalWeight);
       }
     }
 
@@ -3939,7 +3941,7 @@ function runCashTimeBacktest(score, dailyData, intradayData, tradingDays, cashTi
         }
       }
       if (totalWeight > 0) {
-        equity *= (1 + overnightReturn);
+        equity *= (1 + overnightReturn / totalWeight);
       }
     }
 
@@ -4018,7 +4020,7 @@ function runDualVsEodBacktestDaily(score, dailyData, intradayData, tradingDays, 
           totalWeight += h.weight;
         }
       }
-      if (totalWeight > 0) dualEquity *= (1 + overnightReturn);
+      if (totalWeight > 0) dualEquity *= (1 + overnightReturn / totalWeight);
     }
 
     // Morning rebalance (threshold-aware + execution threshold + take-profit filter)
@@ -4049,7 +4051,7 @@ function runDualVsEodBacktestDaily(score, dailyData, intradayData, tradingDays, 
           totalWeight += h.weight;
         }
       }
-      if (totalWeight > 0) dualEquity *= (1 + intradayReturn);
+      if (totalWeight > 0) dualEquity *= (1 + intradayReturn / totalWeight);
     }
 
     // EOD rebalance (threshold-aware)
@@ -4079,7 +4081,7 @@ function runDualVsEodBacktestDaily(score, dailyData, intradayData, tradingDays, 
           totalWeight += h.weight;
         }
       }
-      if (totalWeight > 0) eodEquity *= (1 + dayReturn);
+      if (totalWeight > 0) eodEquity *= (1 + dayReturn / totalWeight);
     }
 
     if (eodSelection.length > 0) {
@@ -4154,7 +4156,7 @@ function runSingleVsEodBacktestDaily(score, dailyData, intradayData, tradingDays
           totalWeight += h.weight;
         }
       }
-      if (totalWeight > 0) singleEquity *= (1 + dayReturn);
+      if (totalWeight > 0) singleEquity *= (1 + dayReturn / totalWeight);
     }
 
     if (singleSelection.length > 0) {
@@ -4185,7 +4187,7 @@ function runSingleVsEodBacktestDaily(score, dailyData, intradayData, tradingDays
           totalWeight += h.weight;
         }
       }
-      if (totalWeight > 0) eodEquity *= (1 + dayReturn);
+      if (totalWeight > 0) eodEquity *= (1 + dayReturn / totalWeight);
     }
 
     if (eodSelection.length > 0) {
@@ -4601,10 +4603,15 @@ function selectBestTime(timeResults, eodResult, tradingDays, testTimes, wfEnable
       else if (maxExpectedDiff <= 0.01) score += 0.2; // Both near zero, that's fine
     }
 
-    // Edge penalty: times with fewer than 4 neighbors get proportionally reduced score
-    // (less validation data = less confidence in the peak)
-    const edgePenalty = checks < 4 ? checks / 4 : 1.0;
-    neighborScores[t] = checks > 0 ? Math.min(1, (score / checks) * edgePenalty) : 0;
+    // Use the neighbor average directly; no edge multiplier. Boundary times (checks=1)
+    // get a neutral 0.5 instead of being unfairly halved by both averaging and a penalty.
+    if (checks >= 2) {
+      neighborScores[t] = Math.min(1, score / checks);
+    } else if (checks === 1) {
+      neighborScores[t] = 0.5;
+    } else {
+      neighborScores[t] = 0;
+    }
   }
 
   // --- Axis 4: Walk-forward (derive from equity curves) ---
@@ -4771,8 +4778,15 @@ function computeBaseScores(timeResults, eodResult, testTimes) {
       else if (maxExpectedDiff <= 0.01) score += 0.2;
     }
 
-    const edgePenalty = checks < 4 ? checks / 4 : 1.0;
-    neighborScores[t] = checks > 0 ? Math.min(1, (score / checks) * edgePenalty) : 0;
+    // Use neighbor average; require at least 2 checks for confidence (boundary times
+    // with checks=1 get the neutral score 0.5 rather than being unfairly halved).
+    if (checks >= 2) {
+      neighborScores[t] = Math.min(1, score / checks);
+    } else if (checks === 1) {
+      neighborScores[t] = 0.5;
+    } else {
+      neighborScores[t] = 0;
+    }
   }
 
   return { returnScores, ddScores, neighborScores, times };
@@ -4890,6 +4904,13 @@ function computeFinalScores(timeResults, baseScores, robustnessScores, oosScores
   // Score only candidates (times with positive improvement that passed filtering)
   const scoreTimes = candidates.length > 0 ? candidates : baseScores.times;
 
+  // No-viable-time penalty: if every candidate time underperforms EOD (improvement <= 0),
+  // cap the composite so the DD and neighbor axes alone can't push the label to GOOD.
+  // Without this, a strategy where every time loses can still show a 60+ "GOOD" composite
+  // because DD-quality and neighbor-robustness can each independently hit 1.0.
+  const allNegative = scoreTimes.every(t => timeResults[t] && timeResults[t].improvement <= 0);
+  const losingPenalty = allNegative ? 0.4 : 1.0;
+
   for (const t of scoreTimes) {
     const rs = returnScores[t] || 0;
     const ds = ddScores[t] || 0;
@@ -4897,8 +4918,9 @@ function computeFinalScores(timeResults, baseScores, robustnessScores, oosScores
     const rbS = tier1Enabled ? (robustnessScores[t] || 0) : 0;
     const wfS = tier2Enabled ? (oosScores[t] || 0) : 0;
 
-    const total = Math.round((rs * weights.ret + ds * weights.dd + ns * weights.neighbor
-                             + rbS * weights.robustness + wfS * weights.walkforward) * 100);
+    const raw = rs * weights.ret + ds * weights.dd + ns * weights.neighbor
+              + rbS * weights.robustness + wfS * weights.walkforward;
+    const total = Math.round(raw * losingPenalty * 100);
 
     compositeScores[t] = {
       total,
@@ -4906,7 +4928,8 @@ function computeFinalScores(timeResults, baseScores, robustnessScores, oosScores
       ddScore: Math.round(ds * 100),
       neighborScore: Math.round(ns * 100),
       robustnessScore: tier1Enabled ? Math.round(rbS * 100) : null,
-      wfScore: tier2Enabled ? Math.round(wfS * 100) : null
+      wfScore: tier2Enabled ? Math.round(wfS * 100) : null,
+      noViableTime: allNegative
     };
 
     if (total > bestTotal) {
@@ -8227,7 +8250,7 @@ async function main() {
               }
             }
             if (totalWeight > 0) {
-              rdEquity *= (1 + dayReturn);
+              rdEquity *= (1 + dayReturn / totalWeight);
             }
 
             if (rdEquity > rdPeak) rdPeak = rdEquity;
